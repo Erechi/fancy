@@ -1,0 +1,38 @@
+# Релиз собирается здесь, из открытого кода: при пуше тега vX.Y.Z
+# GitHub прогоняет тесты, собирает Fancy.html и печатает его SHA-256 в лог.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Fancy.html + контрольная сумма
+        run: |
+          cp dist/index.html Fancy.html
+          sha256sum Fancy.html | tee Fancy.html.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Fancy.html
+            Fancy.html.sha256
+          generate_release_notes: true
+          body: |
+            **Скачайте `Fancy.html` и откройте его в Chrome или Edge.**
+            Download `Fancy.html` and open it in Chrome or Edge.
+
+            SHA-256 — в файле `Fancy.html.sha256` и в логе этой сборки (Actions → Release).

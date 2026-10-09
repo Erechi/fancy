@@ -15,8 +15,9 @@ import { Toncenter, buildDeployAndRotate, formatGram } from './core/wallet.js';
 import { GpuMiner } from './miner/gpu.js';
 import { t, lang, setLang, locale } from './ui/i18n.js';
 
-/** Ссылка на репозиторий — подставить после публикации на GitHub. */
-const REPO_URL = '';
+/** Ссылка на репозиторий и версия — из package.json (см. vite.config.js). */
+const REPO_URL = __REPO_URL__;
+const APP_VERSION = __APP_VERSION__;
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const POWER_LEVELS = [0.25, 0.5, 0.75, 1];
 const RECOMMENDED_POWER = 0.75;
@@ -399,7 +400,7 @@ function render() {
       </div>
     </header>
     <main id="view"></main>
-    <footer class="foot"><span>© ${new Date().getFullYear()} Fancy</span><span>${t('footer')}</span></footer>
+    <footer class="foot"><span>Fancy v${APP_VERSION}${REPO_URL ? ` · <a href="${esc(REPO_URL)}" target="_blank" rel="noopener">GitHub</a>` : ''}</span><span>${t('footer')}</span></footer>
   `;
   $('[data-home]').onclick = (e) => {
     e.preventDefault();
