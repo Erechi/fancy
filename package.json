@@ -1,0 +1,31 @@
+{
+  "name": "vanity-tg",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/derive.test.js && node test/sandbox.test.js",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 5179 --host 127.0.0.1 --strictPort"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/bip39": "^2.4.0",
+    "@ton/core": "^0.63.1",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "@ton/crypto": "^3.3.0",
+    "@ton/sandbox": "^0.45.0",
+    "micro-key-producer": "^0.10.2",
+    "vite": "^8.3.4",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}
