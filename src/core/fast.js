@@ -199,45 +199,53 @@ export async function wordsToWallet(words, network = 'mainnet') {
 }
 
 // ---------- Шаблон ----------
+// job = { prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true } — любая из частей может быть пустой.
 
 export const PATTERN_CHARS = /^[A-Za-z0-9_-]+$/;
+export const MAX_PART = 8;
 
-/**
- * Проверка шаблона. Для префикса: адрес всегда начинается с «UQ» (в тестнете «0Q»),
- * третий символ может быть только A–D, дальше — любой.
- */
-export function validatePattern(text, type) {
-  if (!text) return 'Введите текст';
-  if (!PATTERN_CHARS.test(text)) return 'Только латиница, цифры, «-» и «_»';
-  if (text.length > 8) return 'Не больше 8 символов';
-  if (type === 'prefix' && !/^[A-Da-d]/.test(text)) return 'После «UQ» третий символ адреса — только A, B, C или D';
+/** Код ошибки одной части (переводится в интерфейсе) или null. */
+export function validatePart(text, kind, caseInsensitive = true) {
+  if (!text) return null;
+  if (!PATTERN_CHARS.test(text)) return 'chars';
+  if (text.length > MAX_PART) return 'long';
+  // адрес всегда начинается с «UQ» (в тестнете «0Q»), третий символ — только A–D
+  if (kind === 'prefix' && !(caseInsensitive ? /^[A-Da-d]/ : /^[A-D]/).test(text)) return 'prefix3';
   return null;
 }
 
-export function makeMatcher(text, type, caseInsensitive) {
-  const t = caseInsensitive ? text.toLowerCase() : text;
-  const L = t.length;
-  if (type === 'suffix') {
-    return caseInsensitive
-      ? (a) => a.slice(48 - L).toLowerCase() === t
-      : (a) => a.endsWith(t);
-  }
-  return caseInsensitive
-    ? (a) => a.slice(2, 2 + L).toLowerCase() === t
-    : (a) => a.startsWith(t, 2);
+export function validateJob(job) {
+  const prefix = validatePart(job.prefix, 'prefix', job.caseInsensitive);
+  const suffix = validatePart(job.suffix, 'suffix', job.caseInsensitive);
+  const empty = !job.prefix && !job.suffix ? 'empty' : null;
+  return { prefix, suffix, empty, ok: !prefix && !suffix && !empty };
 }
 
-/** Вероятность совпадения одного кандидата. Для префикса 3-й символ даёт 1/4 вместо 1/64. */
-export function matchProbability(text, type, caseInsensitive) {
+/** Позиции символов в 48-символьном адресе и допустимые варианты для каждой. */
+export function patternPositions(job) {
+  const out = [];
+  const push = (ch, index) => {
+    const letter = /[A-Za-z]/.test(ch);
+    const alts = job.caseInsensitive && letter ? [ch.toUpperCase(), ch.toLowerCase()] : [ch];
+    out.push({ index, alts });
+  };
+  const p = job.prefix || '';
+  const sfx = job.suffix || '';
+  for (let i = 0; i < p.length; i++) push(p[i], 2 + i);
+  for (let i = 0; i < sfx.length; i++) push(sfx[i], 48 - sfx.length + i);
+  return out;
+}
+
+export function makeMatcher(job) {
+  const pos = patternPositions(job);
+  return (a) => pos.every(({ index, alts }) => alts.includes(a[index]));
+}
+
+/** Вероятность совпадения одного кандидата. Третий символ адреса — только A–D (1/4). */
+export function matchProbability(job) {
   let p = 1;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    const isLetter = /[A-Za-z]/.test(c);
-    if (type === 'prefix' && i === 0) {
-      p *= 1 / 4; // A/B/C/D равновероятны, а в любом регистре буква всё равно одна
-      continue;
-    }
-    p *= caseInsensitive && isLetter ? 2 / 64 : 1 / 64;
+  for (const { index, alts } of patternPositions(job)) {
+    p *= index === 2 ? 1 / 4 : alts.length / 64;
   }
   return p;
 }

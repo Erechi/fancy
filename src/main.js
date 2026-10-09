@@ -4,20 +4,28 @@ import { generateMnemonic } from '@scure/bip39';
 import {
   WORDLIST,
   NETWORKS,
+  MAX_PART,
   bytesToHex,
   makeMatcher,
   matchProbability,
-  validatePattern,
+  validateJob,
   wordsToWallet,
 } from './core/fast.js';
 import { Toncenter, buildDeployAndRotate, formatGram } from './core/wallet.js';
 import { GpuMiner } from './miner/gpu.js';
-import { CpuMiner } from './miner/cpu.js';
+import { t, lang, setLang, locale } from './ui/i18n.js';
 
-// ---------------- состояние ----------------
+/** Ссылка на репозиторий — подставить после публикации на GitHub. */
+const REPO_URL = '';
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const POWER_LEVELS = [0.25, 0.5, 0.75, 1];
+const RECOMMENDED_POWER = 0.75;
+const CHIPS = {
+  suffix: ['GRAM', 'TON', 'FANCY', 'LUCKY', '777', '1337'],
+  prefix: ['Dog', 'Cat', 'Ace', 'Boss', 'Bro', 'D1'],
+};
 
-const LS_FOUND = 'vanity.found.v1';
-const LS_PREFS = 'vanity.prefs.v1';
+// ---------------- хранилище ----------------
 
 const store = {
   get(key, fallback) {
@@ -32,33 +40,48 @@ const store = {
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch {
-      /* приватный режим — живём без сохранения */
+      /* приватный режим — работаем без сохранения */
     }
   },
 };
 
+const K_FOUND = 'fancy.found.v1';
+const K_HISTORY = 'fancy.history.v1';
+const K_PREFS = 'fancy.prefs.v1';
+
+function loadFound() {
+  const list = store.get(K_FOUND, null);
+  if (list) return list;
+  // перенос находок из первой версии
+  const old = store.get('vanity.found.v1', []);
+  return old.map((f) => ({
+    ...f,
+    prefix: f.type === 'prefix' ? f.pattern : '',
+    suffix: f.type === 'prefix' ? '' : f.pattern,
+    caseInsensitive: true,
+  }));
+}
+
 const prefs = Object.assign(
-  { text: 'GRAM', type: 'suffix', caseInsensitive: true, network: 'mainnet', apiKey: '' },
-  store.get(LS_PREFS, {}),
+  { mode: 'suffix', prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true, network: 'mainnet', apiKey: '', power: RECOMMENDED_POWER },
+  store.get(K_PREFS, {}),
 );
 
 const state = {
-  device: { status: 'checking', gpu: null, gpuError: null, cpuThreads: navigator.hardwareConcurrency || 4, rate: { gpu: 0, cpu: 0 } },
-  engine: null, // 'gpu' | 'cpu'
-  mining: null, // { started, checked, rate, job, found }
-  found: store.get(LS_FOUND, []),
-  claim: null, // address открытого оформления
+  view: 'home', // home | hunt | found | claim
+  device: { status: 'checking', name: '', error: null, rate: 0 },
+  hunt: null,
+  found: loadFound(),
+  history: store.get(K_HISTORY, []),
+  claim: null,
+  claimUi: null,
 };
 
-const gpuMiner = { instance: null };
-const cpuMiner = new CpuMiner();
+const saveFound = () => store.set(K_FOUND, state.found);
+const saveHistory = () => store.set(K_HISTORY, state.history.slice(0, 30));
+const savePrefs = () => store.set(K_PREFS, prefs);
 
-function saveFound() {
-  store.set(LS_FOUND, state.found);
-}
-function savePrefs() {
-  store.set(LS_PREFS, prefs);
-}
+let miner = null;
 
 // ---------------- утилиты ----------------
 
@@ -66,29 +89,65 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-function fmtRate(r) {
-  if (!r) return '—';
-  if (r >= 1e6) return (r / 1e6).toFixed(2) + ' M';
-  if (r >= 1e3) return (r / 1e3).toFixed(1) + ' K';
-  return Math.round(r).toString();
+function currentJob() {
+  return {
+    prefix: prefs.mode === 'suffix' ? '' : prefs.prefix,
+    suffix: prefs.mode === 'prefix' ? '' : prefs.suffix,
+    caseInsensitive: prefs.caseInsensitive,
+    network: prefs.network,
+  };
 }
 
-function fmtNum(n) {
-  return Math.round(n).toLocaleString('ru-RU');
+function patternLabel(job) {
+  return `${job.prefix ? 'UQ' + job.prefix : ''}…${job.suffix || ''}`;
+}
+
+function fmtCompact(n) {
+  return new Intl.NumberFormat(locale(), { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+}
+function fmtInt(n) {
+  return Math.round(n).toLocaleString(locale());
+}
+function fmtRate(r) {
+  return r ? fmtCompact(r) : '—';
 }
 
 function fmtDur(sec) {
+  const ru = lang === 'ru';
+  const u = ru ? { s: 'с', m: 'мин', h: 'ч', d: 'дн', y: 'лет' } : { s: 's', m: 'min', h: 'h', d: 'd', y: 'years' };
   if (!isFinite(sec)) return '∞';
-  if (sec < 1) return '< 1 с';
-  if (sec < 60) return `${Math.round(sec)} с`;
-  if (sec < 3600) return `${Math.round(sec / 60)} мин`;
-  if (sec < 86400 * 2) {
+  if (sec < 1) return ru ? '< 1 с' : '< 1 s';
+  if (sec < 60) return `${Math.round(sec)} ${u.s}`;
+  if (sec < 3600) return `${Math.round(sec / 60)} ${u.m}`;
+  if (sec < 172800) {
     const h = Math.floor(sec / 3600);
     const m = Math.round((sec % 3600) / 60);
-    return m ? `${h} ч ${m} мин` : `${h} ч`;
+    return m ? `${h} ${u.h} ${m} ${u.m}` : `${h} ${u.h}`;
   }
-  if (sec < 86400 * 365) return `${Math.round(sec / 86400)} дн`;
-  return `${(sec / 86400 / 365).toFixed(1)} лет`;
+  if (sec < 86400 * 365) return `${Math.round(sec / 86400)} ${u.d}`;
+  const y = sec / 86400 / 365;
+  return y > 1e6 ? (ru ? 'миллионы лет' : 'millions of years') : `${fmtCompact(y)} ${u.y}`;
+}
+
+function fmtClock(sec) {
+  const s = Math.floor(sec % 60);
+  const m = Math.floor((sec / 60) % 60);
+  const h = Math.floor(sec / 3600);
+  const pad = (x) => String(x).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function tier(sec) {
+  if (!isFinite(sec)) return 'insane';
+  if (sec < 60) return 'fast';
+  if (sec < 3600) return 'mid';
+  if (sec < 86400) return 'slow';
+  return sec < 86400 * 30 ? 'long' : 'insane';
+}
+
+/** Скорость с учётом выбранной нагрузки. */
+function effectiveRate() {
+  return state.device.rate * prefs.power;
 }
 
 async function copy(text, btn) {
@@ -96,7 +155,7 @@ async function copy(text, btn) {
     await navigator.clipboard.writeText(text);
     if (btn) {
       const old = btn.textContent;
-      btn.textContent = 'Скопировано';
+      btn.textContent = t('copied');
       setTimeout(() => (btn.textContent = old), 1400);
     }
   } catch {
@@ -104,35 +163,109 @@ async function copy(text, btn) {
   }
 }
 
-function currentRate() {
-  return state.engine ? state.device.rate[state.engine] : 0;
+/** Адрес с подсвеченными символами шаблона. */
+function addrHtml(address, job, cls = '') {
+  const pre = job.prefix ? job.prefix.length : 0;
+  const suf = job.suffix ? job.suffix.length : 0;
+  const head = address.slice(0, 2);
+  const p = address.slice(2, 2 + pre);
+  const mid = address.slice(2 + pre, 48 - suf);
+  const s = address.slice(48 - suf);
+  return `<span class="addr ${cls}"><span class="dim">${esc(head)}</span>${p ? `<b>${esc(p)}</b>` : ''}<span class="dim">${esc(mid)}</span>${s ? `<b>${esc(s)}</b>` : ''}</span>`;
 }
 
-function highlight(address, text, type) {
-  const L = text.length;
-  if (type === 'suffix') {
-    return `<span class="dim">${esc(address.slice(0, 48 - L))}</span><b>${esc(address.slice(48 - L))}</b>`;
+// ---------------- звук и уведомление о находке ----------------
+
+let audio = null;
+function primeAlerts() {
+  try {
+    audio ??= new (window.AudioContext || window.webkitAudioContext)();
+  } catch {
+    audio = null;
   }
-  return `<span class="dim">${esc(address.slice(0, 2))}</span><b>${esc(address.slice(2, 2 + L))}</b><span class="dim">${esc(address.slice(2 + L))}</span>`;
+  try {
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  } catch {
+    /* браузер без уведомлений */
+  }
 }
 
-// ---------------- оценка устройства ----------------
+function alertFound(address) {
+  try {
+    if (audio) {
+      const now = audio.currentTime;
+      [880, 1175, 1568].forEach((f, i) => {
+        const o = audio.createOscillator();
+        const g = audio.createGain();
+        o.frequency.value = f;
+        o.type = 'sine';
+        g.gain.setValueAtTime(0.0001, now + i * 0.14);
+        g.gain.exponentialRampToValueAtTime(0.2, now + i * 0.14 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.14 + 0.35);
+        o.connect(g).connect(audio.destination);
+        o.start(now + i * 0.14);
+        o.stop(now + i * 0.14 + 0.4);
+      });
+    }
+  } catch {
+    /* без звука */
+  }
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') new Notification(t('notifTitle'), { body: address });
+  } catch {
+    /* без уведомления */
+  }
+}
 
-function prettyGpu(name) {
-  if (!name) return 'WebGPU';
-  const vendors = { nvidia: 'NVIDIA', amd: 'AMD', intel: 'Intel', apple: 'Apple', qualcomm: 'Qualcomm', arm: 'ARM' };
-  return name
+// ---------------- устройство ----------------
+
+/** Точная модель видеокарты из WebGL (WebGPU в Chrome отдаёт только вендора и архитектуру). */
+function gpuModelName(fallback) {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const ext = gl?.getExtension('WEBGL_debug_renderer_info');
+    const r = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+    const m = /ANGLE \([^,]+,\s*([^,(]+?)\s*(\(0x|Direct3D|,)/.exec(r);
+    if (m) return m[1].trim();
+    if (r && !/ANGLE/.test(r)) return r;
+  } catch {
+    /* нет WebGL */
+  }
+  const vendors = { nvidia: 'NVIDIA', amd: 'AMD', intel: 'Intel', apple: 'Apple' };
+  return (fallback || 'WebGPU')
     .split(' ')
     .map((w) => vendors[w.toLowerCase()] || w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ');
 }
 
-// Короткий прогон на заведомо недостижимом шаблоне. Первую половину отсчётов
-// (разгон размера пачки и прогрев) отбрасываем, берём медиану остальных.
-async function benchmark(engine, ms = engine === 'gpu' ? 3500 : 4000) {
-  const job = { text: 'zZ9_-zZ9', type: 'suffix', caseInsensitive: false, network: 'mainnet' };
+async function detectDevice() {
+  const d = state.device;
+  try {
+    miner = await GpuMiner.create();
+    d.name = gpuModelName(miner.adapterName);
+    d.status = 'selftest';
+    renderDevice();
+    await miner.selfTest(16);
+    d.status = 'bench';
+    renderDevice();
+    d.rate = await benchmark();
+    d.status = 'ready';
+  } catch (e) {
+    console.warn('GPU недоступен:', e);
+    d.status = 'nogpu';
+    d.error = e.message || String(e);
+    miner = null;
+  }
+  renderDevice();
+  renderSettings();
+  renderWaitTable();
+}
+
+// Короткий прогон на недостижимом шаблоне при полной нагрузке; разгон отбрасываем, берём медиану.
+async function benchmark(ms = 3500) {
+  const job = { suffix: 'zZ9_-zZ9', caseInsensitive: false, network: 'mainnet' };
   const samples = [];
-  const miner = engine === 'gpu' ? gpuMiner.instance : cpuMiner;
+  miner.power = 1;
   const done = miner.run(job, (_, r) => r && samples.push(r), () => {});
   await new Promise((r) => setTimeout(r, ms));
   miner.stop();
@@ -141,179 +274,247 @@ async function benchmark(engine, ms = engine === 'gpu' ? 3500 : 4000) {
   return tail[Math.floor(tail.length / 2)] || samples.at(-1) || 0;
 }
 
-async function detectDevice() {
-  const d = state.device;
-  d.status = 'checking';
-  renderDevice();
-  try {
-    gpuMiner.instance = await GpuMiner.create();
-    d.gpu = prettyGpu(gpuMiner.instance.adapterName);
-    d.status = 'selftest';
-    renderDevice();
-    await gpuMiner.instance.selfTest(16);
-    d.status = 'bench';
-    renderDevice();
-    d.rate.gpu = await benchmark('gpu');
-    state.engine = 'gpu';
-  } catch (e) {
-    console.warn('GPU недоступен:', e);
-    d.gpuError = e.message || String(e);
-    gpuMiner.instance = null;
-    d.status = 'bench';
-    renderDevice();
-    d.rate.cpu = await benchmark('cpu');
-    state.engine = 'cpu';
-  }
-  d.status = 'ready';
-  renderDevice();
-  renderBuilder();
-}
+// ---------------- поиск ----------------
 
-async function switchEngine(engine) {
-  if (state.mining || state.engine === engine) return;
-  state.engine = engine;
-  if (!state.device.rate[engine]) {
-    state.device.status = 'bench';
-    renderDevice();
-    state.device.rate[engine] = await benchmark(engine);
-    state.device.status = 'ready';
-  }
-  renderDevice();
-  renderBuilder();
-}
-
-// ---------------- майнинг ----------------
-
-async function startMining() {
-  const err = validatePattern(prefs.text, prefs.type);
-  if (err || !state.engine || state.mining) return;
-  const job = { text: prefs.text, type: prefs.type, caseInsensitive: prefs.caseInsensitive, network: prefs.network };
-  const match = makeMatcher(job.text, job.type, job.caseInsensitive);
-  const m = { started: performance.now(), checked: 0, rate: 0, job, found: null, error: null };
-  state.mining = m;
-  renderBuilder();
-  const miner = state.engine === 'gpu' ? gpuMiner.instance : cpuMiner;
-  const ticker = setInterval(renderProgress, 250);
-
-  const onFound = async ({ words, address }) => {
-    if (m.found) return;
-    // независимая перепроверка перед сохранением
-    const w = await wordsToWallet(words, job.network);
-    if (w.address !== address || !match(address)) return;
-    m.found = address;
-    miner.stop();
-    state.found.unshift({
-      address,
-      anchor: words,
-      pattern: job.text,
-      type: job.type,
-      network: job.network,
-      createdAt: Date.now(),
-      status: 'found',
-    });
-    saveFound();
+function startHunt() {
+  const job = currentJob();
+  if (!validateJob(job).ok || state.device.status !== 'ready' || state.hunt) return;
+  primeAlerts();
+  state.hunt = {
+    job,
+    p: matchProbability(job),
+    checkedBefore: 0,
+    checked: 0,
+    rate: 0,
+    sample: '',
+    activeMs: 0,
+    runStarted: performance.now(),
+    paused: false,
+    found: null,
+    error: null,
+    startedAt: Date.now(),
   };
+  state.view = 'hunt';
+  render();
+  window.scrollTo({ top: 0 });
+  runHunt();
+}
 
+async function runHunt() {
+  const h = state.hunt;
+  const match = makeMatcher(h.job);
+  h.runStarted = performance.now();
+  miner.power = prefs.power;
+  const ticker = setInterval(renderHuntLive, 250);
   try {
     await miner.run(
-      job,
-      (checked, rate) => {
-        m.checked = checked;
-        if (rate) {
-          m.rate = rate;
-          state.device.rate[state.engine] = rate;
-        }
+      h.job,
+      (checked, rate, sample) => {
+        h.checked = h.checkedBefore + checked;
+        if (rate) h.rate = rate;
+        if (sample) h.sample = sample;
       },
-      onFound,
+      async ({ words, address }) => {
+        if (h.found) return;
+        // независимая перепроверка перед сохранением
+        const w = await wordsToWallet(words, h.job.network);
+        if (w.address !== address || !match(address)) return;
+        h.found = address;
+        miner.stop();
+        state.found.unshift({
+          address,
+          anchor: words,
+          prefix: h.job.prefix,
+          suffix: h.job.suffix,
+          caseInsensitive: h.job.caseInsensitive,
+          network: h.job.network,
+          createdAt: Date.now(),
+          status: 'found',
+        });
+        saveFound();
+      },
     );
   } catch (e) {
-    m.error = e.message || String(e);
+    h.error = e.message || String(e);
   }
   clearInterval(ticker);
-  state.mining = null;
-  renderBuilder();
-  renderFound();
-  if (m.found) {
-    document.getElementById(`f-${m.found}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  } else if (m.error) {
-    alert('Майнинг остановлен: ' + m.error);
+  h.activeMs += performance.now() - h.runStarted;
+  h.checkedBefore = h.checked;
+  if (h.paused && !h.found && !h.error) return renderHunt();
+  finishHunt();
+}
+
+function finishHunt() {
+  const h = state.hunt;
+  state.history.unshift({
+    prefix: h.job.prefix,
+    suffix: h.job.suffix,
+    caseInsensitive: h.job.caseInsensitive,
+    network: h.job.network,
+    at: h.startedAt,
+    seconds: Math.round(h.activeMs / 1000),
+    checked: h.checked,
+    result: h.found ? 'found' : 'stopped',
+    address: h.found || null,
+  });
+  saveHistory();
+  if (h.found) {
+    alertFound(h.found);
+    document.title = '✦ ' + t('foundTitle') + ' — Fancy';
+    state.view = 'found';
+  } else {
+    if (h.error) alert(t('stopError', h.error));
+    state.view = 'home';
+    state.hunt = null;
+    document.title = 'Fancy';
+  }
+  render();
+}
+
+function togglePause() {
+  const h = state.hunt;
+  if (!h || h.found) return;
+  if (!h.paused) {
+    h.paused = true;
+    miner.stop(); // runHunt дождётся остановки и перерисует экран
+  } else {
+    h.paused = false;
+    renderHunt();
+    runHunt();
   }
 }
 
-function stopMining() {
-  if (!state.mining) return;
-  (state.engine === 'gpu' ? gpuMiner.instance : cpuMiner).stop();
+function stopHunt() {
+  const h = state.hunt;
+  if (!h) return;
+  if (h.paused) {
+    h.paused = false;
+    finishHunt();
+  } else {
+    h.paused = false;
+    miner.stop();
+  }
 }
 
-// ---------------- разметка ----------------
+// ---------------- разметка: каркас ----------------
 
-function renderShell() {
+function render() {
+  document.documentElement.lang = lang;
   $('#app').innerHTML = `
     <header class="top">
-      <div class="brand"><span class="logo">◆</span> Vanity <span class="tag">free</span></div>
-      <a class="ghost-link" href="#how">Как это работает</a>
-    </header>
-
-    <section class="hero">
-      <h1>Красивые адреса для <em>Telegram Wallet</em></h1>
-      <p class="lead">Адрес с вашим словом в конце или в начале. Поиск идёт прямо в этом браузере — на видеокарте или процессоре.
-      Все 24 слова создаются у вас и никуда не отправляются. Бесплатно.</p>
-      <div id="device" class="device"></div>
-    </section>
-
-    <section class="grid">
-      <div id="builder" class="card builder"></div>
-      <div id="preview" class="card preview"></div>
-    </section>
-
-    <section id="found-wrap"></section>
-    <section id="claim-wrap"></section>
-
-    <section id="how" class="how">
-      <h2>Как это работает</h2>
-      <ol class="flow">
-        <li><b>Поиск</b><span>Браузер перебирает случайные фразы из 12 слов, пока адрес не совпадёт с шаблоном.</span></li>
-        <li><b>Вторая половина</b><span>Браузер создаёт ещё 12 слов — подписывающие. Вместе получается 24.</span></li>
-        <li><b>Пополнение</b><span>Вы отправляете ~0.05 GRAM на найденный адрес, чтобы оплатить развёртывание.</span></li>
-        <li><b>Смена ключа</b><span>Одна транзакция разворачивает кошелёк и переключает его ключ на 24 слова.</span></li>
-        <li><b>Импорт</b><span>Telegram → Wallet → Импорт, вводите 24 слова. Готово.</span></li>
-      </ol>
-      <div class="facts">
-        <div><h3>Без сервера</h3><p>У сайта нет бэкенда. Фразы существуют только в этой вкладке и в хранилище вашего браузера. В сеть уходит лишь подписанная транзакция смены ключа — через публичный toncenter.</p></div>
-        <div><h3>Проверяемо</h3><p>Контракт WalletTg открыт: <a href="https://github.com/ton-blockchain/tg-wallet-contract" target="_blank" rel="noopener">ton-blockchain/tg-wallet-contract</a>. После смены ключа его публичный ключ равен ключу ваших 24 слов — видно в любом эксплорере.</p></div>
-        <div><h3>Время случайное</h3><p>Оценка — это медиана: половина поисков заканчивается раньше, 1 из 20 занимает примерно в 4 раза дольше. Каждый символ в точном регистре умножает время на 64, в любом — примерно на 32.</p></div>
+      <a class="brand" href="#" data-home><span class="spark">✦</span>fancy</a>
+      <div class="top-actions">
+        <div class="lang">${['ru', 'en'].map((l) => `<button data-lang="${l}" class="${lang === l ? 'on' : ''}">${l.toUpperCase()}</button>`).join('')}</div>
+        ${REPO_URL ? `<a class="pill-link" href="${esc(REPO_URL)}" target="_blank" rel="noopener">${t('source')}</a>` : ''}
       </div>
-      <p class="disclaimer">Не аффилированы с Telegram. Telegram Wallet — продукт его правообладателя. Используйте на свой риск; для начала попробуйте короткий шаблон и небольшую сумму.</p>
+    </header>
+    <main id="view"></main>
+    <footer class="foot"><span>© ${new Date().getFullYear()} Fancy</span><span>${t('footer')}</span></footer>
+  `;
+  $('[data-home]').onclick = (e) => {
+    e.preventDefault();
+    if (state.view === 'claim' || state.view === 'found') {
+      state.view = 'home';
+      state.hunt = null;
+      render();
+    }
+  };
+  document.querySelectorAll('[data-lang]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        setLang(b.dataset.lang);
+        render();
+      }),
+  );
+  if (state.view === 'home') renderHome();
+  else if (state.view === 'hunt') renderHunt();
+  else if (state.view === 'found') renderFoundView();
+  else if (state.view === 'claim') renderClaim();
+}
+
+// ---------------- главная ----------------
+
+function renderHome() {
+  $('#view').innerHTML = `
+    <section class="home">
+      <div class="hero">
+        <span class="badge"><i></i>${t('badgeLocal')}</span>
+        <h1>${t('heroTitle')[0]}<br><span class="grad">${t('heroTitle')[1]}</span></h1>
+        <p class="lead">${t('heroLead')}</p>
+        <div class="showcase mono" id="showcase"></div>
+        <ul class="points">${t('heroPoints').map((p) => `<li>${p}</li>`).join('')}</ul>
+        <div id="device" class="device"></div>
+      </div>
+      <div class="panel" id="settings"></div>
+    </section>
+    <section class="block" id="wait"></section>
+    <section class="block" id="mine"></section>
+    <section class="block" id="history"></section>
+    <section class="block">
+      <h2>${t('howTitle')}</h2>
+      <ol class="flow">${t('how').map(([a, b]) => `<li><b>${a}</b><span>${b}</span></li>`).join('')}</ol>
+    </section>
+    <section class="block">
+      <h2>${t('factsTitle')}</h2>
+      <div class="facts">${t('facts').map(([a, b]) => `<div><h3>${a}</h3><p>${b}</p></div>`).join('')}</div>
+    </section>
+    <section class="block">
+      <h2>${t('faqTitle')}</h2>
+      <div class="faq">${t('faq').map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join('')}</div>
     </section>
   `;
+  renderDevice();
+  renderSettings();
+  renderWaitTable();
+  renderMine();
+  renderHistory();
+  startShowcase();
+}
+
+let showcaseTimer = null;
+let filler = '';
+function startShowcase() {
+  clearInterval(showcaseTimer);
+  const rnd = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (x) => B64[x & 63]).join('');
+  if (!filler) filler = 'ABCD'[crypto.getRandomValues(new Uint8Array(1))[0] & 3] + rnd(45);
+  const draw = () => {
+    const el = $('#showcase');
+    if (!el) return clearInterval(showcaseTimer);
+    const job = currentJob();
+    const pre = job.prefix || '';
+    const suf = job.suffix || '';
+    const head = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
+    const addr = (head + pre + filler).slice(0, 48 - suf.length) + suf;
+    el.innerHTML = addrHtml(addr, job);
+  };
+  draw();
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  showcaseTimer = setInterval(() => {
+    const arr = filler.split('');
+    const r = crypto.getRandomValues(new Uint8Array(6));
+    for (let i = 0; i < 3; i++) arr[1 + (r[i] % 44)] = B64[r[i + 3] & 63];
+    filler = arr.join('');
+    draw();
+  }, 140);
 }
 
 function renderDevice() {
-  const d = state.device;
   const el = $('#device');
   if (!el) return;
-  const steps = {
-    checking: 'Готовим видеокарту — при первом запуске это до 30 секунд…',
-    selftest: `Видеокарта найдена: ${esc(d.gpu)}. Сверяем расчёты GPU с процессором…`,
-    bench: 'Замеряем скорость вашего устройства…',
-  };
-  if (d.status !== 'ready') {
-    el.innerHTML = `<span class="pulse"></span>${steps[d.status]}`;
+  const d = state.device;
+  if (d.status === 'nogpu') {
+    el.className = 'device bad';
+    el.innerHTML = `<span class="dot"></span>${esc(t('gpuUnavailable', d.error))}`;
     return;
   }
-  const gpuOk = !!gpuMiner.instance;
-  el.innerHTML = `
-    <span class="dot ${state.engine}"></span>
-    <span>${state.engine === 'gpu' ? `Видеокарта · ${esc(d.gpu)}` : `Процессор · ${d.cpuThreads} потоков`}</span>
-    <span class="sep">·</span>
-    <b class="mono">${fmtRate(currentRate())}</b><span class="muted">фраз/с</span>
-    <span class="engine-switch">
-      <button data-engine="gpu" class="${state.engine === 'gpu' ? 'on' : ''}" ${gpuOk ? '' : 'disabled title="' + esc(d.gpuError || 'WebGPU недоступен') + '"'}>GPU</button>
-      <button data-engine="cpu" class="${state.engine === 'cpu' ? 'on' : ''}">CPU</button>
-    </span>
-    ${!gpuOk && d.gpuError ? `<div class="hint">Видеокарта недоступна (${esc(d.gpuError)}). Для скорости откройте сайт в свежем Chrome или Edge.</div>` : ''}
-  `;
-  el.querySelectorAll('[data-engine]').forEach((b) => (b.onclick = () => switchEngine(b.dataset.engine)));
+  if (d.status !== 'ready') {
+    const txt = d.status === 'checking' ? t('devChecking') : d.status === 'selftest' ? t('devSelftest', esc(d.name)) : t('devBench');
+    el.className = 'device';
+    el.innerHTML = `<span class="pulse"></span>${txt}`;
+    return;
+  }
+  el.className = 'device';
+  el.innerHTML = `<span class="dot ok"></span><span>${esc(d.name)}</span><span class="sep">·</span><b class="mono">${fmtRate(d.rate)}</b><span class="muted">${t('perSec')}</span>`;
 }
 
 function seg(name, options, value) {
@@ -322,189 +523,333 @@ function seg(name, options, value) {
     .join('')}</div>`;
 }
 
-function renderBuilder() {
-  const el = $('#builder');
-  const m = state.mining;
-  const err = validatePattern(prefs.text, prefs.type);
-  const prefix = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
-  el.innerHTML = `
-    <label class="label">Ваш текст</label>
+function field(kind) {
+  const v = kind === 'prefix' ? prefs.prefix : prefs.suffix;
+  const head = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
+  const affixL = kind === 'prefix' ? head : '…';
+  const affixR = kind === 'prefix' ? '…' : '';
+  return `
+    <label class="label">${kind === 'prefix' ? t('atStart') : t('atEnd')}</label>
     <div class="input-row">
-      ${prefs.type === 'prefix' ? `<span class="affix">${prefix}</span>` : `<span class="affix">${prefix}…</span>`}
-      <input id="pat" maxlength="8" spellcheck="false" autocomplete="off" value="${esc(prefs.text)}" ${m ? 'disabled' : ''} />
-      <span class="count">${prefs.text.length} / 8</span>
+      <span class="affix">${affixL}</span>
+      <input data-field="${kind}" maxlength="${MAX_PART}" spellcheck="false" autocomplete="off" value="${esc(v)}" />
+      ${affixR ? `<span class="affix">${affixR}</span>` : ''}
+      <span class="count">${v.length}/${MAX_PART}</span>
     </div>
-    ${err ? `<div class="err">${esc(err)}</div>` : ''}
-    <div class="row2">
-      <div><label class="label">Где</label>${seg('type', [['suffix', 'В конце'], ['prefix', 'В начале']], prefs.type)}</div>
-      <div><label class="label">Регистр</label>${seg('case', [[true, 'Любой'], [false, 'Точный']], prefs.caseInsensitive)}</div>
-    </div>
-    <p class="note">${prefs.caseInsensitive ? 'lucky, Lucky и LUCKY подойдут — в разы быстрее.' : 'Буквы именно в таком регистре — каждая буква дольше примерно вдвое.'} Латиница, цифры, «-» и «_».</p>
-    <details class="adv" ${prefs.network !== 'mainnet' ? 'open' : ''}>
-      <summary>Дополнительно</summary>
-      <label class="label">Сеть</label>${seg('net', [['mainnet', 'Mainnet'], ['testnet', 'Testnet']], prefs.network)}
-      <label class="label">Ключ toncenter API (необязательно)</label>
-      <input id="apikey" class="plain" placeholder="без ключа — 1 запрос в секунду" value="${esc(prefs.apiKey)}" />
-    </details>
+    <div class="err" data-err="${kind}"></div>`;
+}
+
+function renderSettings() {
+  const el = $('#settings');
+  if (!el) return;
+  const showPre = prefs.mode !== 'suffix';
+  const showSuf = prefs.mode !== 'prefix';
+  const chipKind = showSuf ? 'suffix' : 'prefix';
+  const ready = state.device.status === 'ready';
+  el.innerHTML = `
+    <div class="panel-title">${t('settings')}</div>
+    ${seg('mode', [['suffix', t('atEnd')], ['prefix', t('atStart')], ['both', t('both')]], prefs.mode)}
+    ${showPre ? field('prefix') : ''}
+    ${showSuf ? field('suffix') : ''}
+    <div class="chips"><span class="chips-label">${t('popular')}</span>${CHIPS[chipKind]
+      .map((c) => `<button class="chip" data-chip="${c}">${c}</button>`)
+      .join('')}</div>
+    <label class="label">${t('caseLabel')}</label>
+    ${seg('case', [[true, t('caseAny')], [false, t('caseExact')]], prefs.caseInsensitive)}
+    <p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${t('allowed')}</p>
     <div id="estimate"></div>
-    ${
-      m
-        ? `<button id="stop" class="btn danger">Остановить</button>`
-        : `<button id="go" class="btn" ${err || !state.engine ? 'disabled' : ''}>${state.engine ? 'Начать поиск' : 'Ждём замер скорости…'}</button>`
-    }
+    <details class="adv">
+      <summary>${t('advanced')}</summary>
+      <label class="label">${t('gpuLoad')}</label>
+      <div class="power" data-power>${POWER_LEVELS.map(
+        (p) =>
+          `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}"><b>${Math.round(p * 100)}%</b><span>${powerName(p)}</span></button>`,
+      ).join('')}</div>
+      <p class="note">${t('powerNote')}</p>
+      <label class="label">${t('network')}</label>
+      ${seg('net', [['mainnet', 'Mainnet'], ['testnet', 'Testnet']], prefs.network)}
+      <label class="label">${t('apiKey')}</label>
+      <input id="apikey" class="plain" placeholder="${esc(t('apiKeyPh'))}" value="${esc(prefs.apiKey)}" />
+    </details>
+    <button id="go" class="cta" ${ready ? '' : 'disabled'}>${ready ? t('start') : state.device.status === 'nogpu' ? '—' : t('waitBench')}</button>
+    <div class="lock">🔒 ${t('localNote')}</div>
   `;
 
-  const inp = $('#pat');
-  inp.oninput = () => {
-    const pos = inp.selectionStart;
-    prefs.text = inp.value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8);
-    savePrefs();
-    renderBuilder();
-    const n = $('#pat');
-    n.focus();
-    n.setSelectionRange(pos, pos);
-  };
+  el.querySelectorAll('[data-field]').forEach((inp) => {
+    inp.oninput = () => {
+      const kind = inp.dataset.field;
+      const clean = inp.value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_PART);
+      if (clean !== inp.value) inp.value = clean;
+      prefs[kind] = clean;
+      savePrefs();
+      inp.parentElement.querySelector('.count').textContent = `${clean.length}/${MAX_PART}`;
+      updateLive();
+    };
+  });
   el.querySelectorAll('[data-seg] button').forEach((b) => {
     b.onclick = () => {
-      if (state.mining) return;
       const k = b.parentElement.dataset.seg;
-      if (k === 'type') prefs.type = b.dataset.v;
+      if (k === 'mode') prefs.mode = b.dataset.v;
       if (k === 'case') prefs.caseInsensitive = b.dataset.v === 'true';
       if (k === 'net') prefs.network = b.dataset.v;
       savePrefs();
-      renderBuilder();
+      renderSettings();
+      startShowcase();
+      renderWaitTable();
     };
   });
-  const ak = $('#apikey');
-  ak.onchange = () => {
-    prefs.apiKey = ak.value.trim();
+  el.querySelectorAll('[data-chip]').forEach((b) => {
+    b.onclick = () => {
+      prefs[chipKind] = b.dataset.chip;
+      savePrefs();
+      renderSettings();
+      startShowcase();
+    };
+  });
+  el.querySelectorAll('[data-p]').forEach((b) => {
+    b.onclick = () => {
+      prefs.power = Number(b.dataset.p);
+      savePrefs();
+      renderSettings();
+      renderWaitTable();
+    };
+  });
+  if (el.querySelector('details.adv') && prefs._advOpen) el.querySelector('details.adv').open = true;
+  el.querySelector('details.adv').ontoggle = (e) => (prefs._advOpen = e.target.open);
+  $('#apikey').onchange = (e) => {
+    prefs.apiKey = e.target.value.trim();
     savePrefs();
   };
-  $('#go') && ($('#go').onclick = startMining);
-  $('#stop') && ($('#stop').onclick = stopMining);
-  renderEstimate();
-  renderPreview();
+  $('#go').onclick = startHunt;
+  updateLive();
 }
 
-function renderEstimate() {
+function powerName(p) {
+  return t('powerNames')[p];
+}
+
+/** Ошибки полей, оценка времени и витрина — без перерисовки всей карточки (не сбивает фокус). */
+function updateLive() {
+  const job = currentJob();
+  const v = validateJob(job);
+  for (const kind of ['prefix', 'suffix']) {
+    const e = document.querySelector(`[data-err="${kind}"]`);
+    if (e) e.textContent = v[kind] ? t('err.' + v[kind]) : '';
+  }
+  const go = $('#go');
+  if (go) go.disabled = !v.ok || state.device.status !== 'ready';
   const el = $('#estimate');
+  if (el) {
+    if (!v.ok) {
+      el.innerHTML = v.empty ? `<div class="err">${t('err.empty')}</div>` : '';
+    } else {
+      const p = matchProbability(job);
+      const rate = effectiveRate();
+      const median = rate ? Math.LN2 / p / rate : NaN;
+      const p95 = rate ? Math.log(20) / p / rate : NaN;
+      const tr = rate ? tier(median) : '';
+      el.innerHTML = `
+        <div class="est ${tr}">
+          <div><span class="k">${t('attempts')}</span><span class="v mono">${fmtCompact(1 / p)}</span></div>
+          <div><span class="k">${t('median')}</span><span class="v">${rate ? fmtDur(median) : t('measuring')}</span></div>
+          <div><span class="k">${t('oneIn20')}</span><span class="v">${rate ? fmtDur(p95) : '—'}</span></div>
+        </div>
+        ${tr === 'long' ? `<div class="warn">${t('longNote')}</div>` : tr === 'insane' ? `<div class="warn bad">${t('tooLong')}</div>` : ''}`;
+    }
+  }
+}
+
+function renderWaitTable() {
+  const el = $('#wait');
   if (!el) return;
-  if (validatePattern(prefs.text, prefs.type)) {
+  const rate = effectiveRate();
+  if (!rate) {
     el.innerHTML = '';
     return;
   }
-  const p = matchProbability(prefs.text, prefs.type, prefs.caseInsensitive);
-  const rate = currentRate();
-  const median = rate ? Math.LN2 / p / rate : NaN;
-  const p95 = rate ? Math.log(20) / p / rate : NaN;
-  const tier = !rate ? '' : median < 60 ? 'fast' : median < 3600 ? 'mid' : median < 86400 ? 'slow' : 'insane';
-  el.innerHTML = `
-    <div class="est ${tier}">
-      <div><span class="k">В среднем перебрать</span><span class="v mono">${fmtNum(1 / p)}</span></div>
-      <div><span class="k">Медиана на этом устройстве</span><span class="v">${rate ? fmtDur(median) : 'замеряем…'}</span></div>
-      <div><span class="k">1 из 20 дольше</span><span class="v">${rate ? fmtDur(p95) : '—'}</span></div>
-    </div>
-    ${tier === 'insane' ? '<div class="warn">Слишком долго для этого устройства. Сократите текст или выберите любой регистр.</div>' : ''}
-    ${state.mining ? '<div id="progress"></div>' : ''}
-  `;
-  renderProgress();
-}
-
-function renderProgress() {
-  const el = $('#progress');
-  const m = state.mining;
-  if (!el || !m) return;
-  const p = matchProbability(m.job.text, m.job.type, m.job.caseInsensitive);
-  const chance = 1 - Math.exp(-m.checked * p);
-  const elapsed = (performance.now() - m.started) / 1000;
-  el.innerHTML = `
-    <div class="bar"><i style="width:${(chance * 100).toFixed(1)}%"></i></div>
-    <div class="prog">
-      <span>Проверено <b class="mono">${fmtNum(m.checked)}</b></span>
-      <span><b class="mono">${fmtRate(m.rate)}</b> фраз/с</span>
-      <span>${fmtDur(elapsed)}</span>
-      <span>шанс уже найти: ${(chance * 100).toFixed(0)}%</span>
-    </div>`;
-  const dev = $('#device .mono');
-  if (dev && m.rate) dev.textContent = fmtRate(m.rate);
-}
-
-let previewFiller = '';
-function renderPreview() {
-  const el = $('#preview');
-  const B = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  if (!previewFiller) {
-    const r = crypto.getRandomValues(new Uint8Array(46));
-    previewFiller = Array.from(r, (x) => B[x & 63]).join('');
+  const rows = [];
+  for (let n = 3; n <= MAX_PART; n++) {
+    const any = Math.LN2 / Math.pow(2 / 64, n) / rate;
+    const exact = Math.LN2 / Math.pow(1 / 64, n) / rate;
+    rows.push(
+      `<tr><td class="mono">${n}</td><td class="${tier(any)}">${fmtDur(any)}</td><td class="${tier(exact)}">${fmtDur(exact)}</td></tr>`,
+    );
   }
-  const net = NETWORKS[prefs.network];
-  const head = net.testOnly ? '0Q' : 'UQ';
-  const t = prefs.text || '…';
-  const L = t.length;
-  let addr;
-  if (prefs.type === 'suffix') addr = head + previewFiller.slice(0, 46 - L) + t;
-  else addr = head + t + previewFiller.slice(0, 46 - L);
   el.innerHTML = `
-    <div class="pv-head"><span>TELEGRAM WALLET · ${prefs.network.toUpperCase()}</span><span class="pill">${state.mining ? 'ПОИСК' : 'ПРИМЕР'}</span></div>
-    <div class="pv-addr mono">${prefs.type === 'suffix' ? highlight(addr, t, 'suffix') : highlight(addr, t, 'prefix')}</div>
-    <div class="pv-big mono">${prefs.type === 'suffix' ? '…' + esc(t) : esc(head + t) + '…'}</div>
-    <div class="pv-meta">
-      <div><span>Цена</span><b>Бесплатно</b></div>
-      <div><span>Регистр</span><b>${prefs.caseInsensitive ? 'любой' : 'точный'}</b></div>
-      <div><span>Считает</span><b>${state.engine === 'gpu' ? 'GPU' : state.engine === 'cpu' ? 'CPU' : '…'}</b></div>
-    </div>`;
+    <h2>${t('waitTitle')}</h2>
+    <p class="sub">${t('waitSub', fmtRate(rate))} ${t('waitBoth')}</p>
+    <div class="table-wrap"><table class="wait">
+      <thead><tr><th>${t('chars')}</th><th>${t('anyCase')}</th><th>${t('exactCase')}</th></tr></thead>
+      <tbody>${rows.join('')}</tbody>
+    </table></div>`;
 }
 
-function renderFound() {
-  const el = $('#found-wrap');
-  if (!state.found.length) {
-    el.innerHTML = '';
-    return;
-  }
-  const status = {
-    found: 'найден',
-    funded: 'пополнен',
-    switched: 'готов к импорту',
-  };
+function renderMine() {
+  const el = $('#mine');
+  if (!el) return;
   el.innerHTML = `
-    <h2>Найденные адреса</h2>
-    <p class="muted small">Хранятся только в этом браузере. Пока ключ не сменён, первые 12 слов — единственный доступ к адресу.</p>
-    <div class="found-list">
-      ${state.found
-        .map(
-          (f) => `
-        <div class="found card" id="f-${esc(f.address)}">
-          <div class="found-top">
-            <span class="pill ${f.status}">${status[f.status] || f.status}</span>
-            <span class="muted small">${f.network === 'testnet' ? 'testnet · ' : ''}${new Date(f.createdAt).toLocaleString('ru-RU')}</span>
-          </div>
-          <div class="mono addr">${highlight(f.address, f.pattern, f.type)}</div>
-          <div class="found-actions">
-            <button class="btn small" data-claim="${esc(f.address)}">${f.status === 'switched' ? 'Открыть' : 'Оформить кошелёк'}</button>
-            <button class="btn small ghost" data-copy="${esc(f.address)}">Копировать адрес</button>
-            <button class="btn small ghost danger-text" data-del="${esc(f.address)}">Удалить</button>
-          </div>
-        </div>`,
-        )
-        .join('')}
-    </div>`;
-  el.querySelectorAll('[data-claim]').forEach((b) => (b.onclick = () => openClaim(b.dataset.claim)));
+    <h2>${t('myTitle')}</h2>
+    <p class="sub">${t('mySub')}</p>
+    ${
+      state.found.length
+        ? `<div class="cards">${state.found
+            .map(
+              (f) => `
+      <div class="card found-card">
+        <div class="row-between">
+          <span class="pill ${esc(f.status)}">${esc(t('status.' + f.status) || f.status)}</span>
+          <span class="muted small">${f.network === 'testnet' ? 'testnet · ' : ''}${new Date(f.createdAt).toLocaleString(locale())}</span>
+        </div>
+        <div class="mono found-addr">${addrHtml(f.address, f)}</div>
+        <div class="row-actions">
+          <button class="btn" data-open="${esc(f.address)}">${f.status === 'switched' ? t('open') : t('toClaim')}</button>
+          <button class="btn ghost" data-copy="${esc(f.address)}">${t('copyAddr')}</button>
+          <button class="btn ghost danger" data-del="${esc(f.address)}">${t('del')}</button>
+        </div>
+      </div>`,
+            )
+            .join('')}</div>`
+        : `<div class="empty">${t('myEmpty')}</div>`
+    }`;
+  el.querySelectorAll('[data-open]').forEach((b) => (b.onclick = () => openClaim(b.dataset.open)));
   el.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => copy(b.dataset.copy, b)));
   el.querySelectorAll('[data-del]').forEach(
     (b) =>
       (b.onclick = () => {
         const f = state.found.find((x) => x.address === b.dataset.del);
-        const msg =
-          f?.status === 'found'
-            ? 'Удалить адрес? Если вы не записали 12 слов, адрес будет потерян навсегда.'
-            : 'Удалить запись с этого устройства? Убедитесь, что все 24 слова записаны — восстановить их будет нельзя.';
-        if (!confirm(msg)) return;
+        if (!confirm(f?.status === 'found' ? t('delFound') : t('delDone'))) return;
         state.found = state.found.filter((x) => x.address !== b.dataset.del);
         saveFound();
-        if (state.claim === b.dataset.del) closeClaim();
-        renderFound();
+        renderMine();
       }),
   );
+}
+
+function renderHistory() {
+  const el = $('#history');
+  if (!el) return;
+  const h = state.history;
+  el.innerHTML = `
+    <div class="row-between"><h2>${t('histTitle')}</h2>${h.length ? `<button class="btn ghost small" id="hclear">${t('histClear')}</button>` : ''}</div>
+    ${
+      h.length
+        ? `<div class="table-wrap"><table class="hist">
+        <tbody>${h
+          .map(
+            (x) => `<tr>
+          <td class="mono strong">${esc(patternLabel(x))}</td>
+          <td class="muted">${x.caseInsensitive ? t('caseAny') : t('caseExact')}</td>
+          <td class="mono">${fmtCompact(x.checked)}</td>
+          <td class="mono">${fmtClock(x.seconds)}</td>
+          <td><span class="pill ${x.result === 'found' ? 'switched' : ''}">${x.result === 'found' ? t('histFound') : t('histStopped')}</span></td>
+          <td class="muted small">${new Date(x.at).toLocaleString(locale())}</td>
+        </tr>`,
+          )
+          .join('')}</tbody></table></div>`
+        : `<div class="empty">${t('histEmpty')}</div>`
+    }`;
+  $('#hclear') &&
+    ($('#hclear').onclick = () => {
+      state.history = [];
+      saveHistory();
+      renderHistory();
+    });
+}
+
+// ---------------- экран поиска ----------------
+
+function renderHunt() {
+  clearInterval(showcaseTimer);
+  const h = state.hunt;
+  $('#view').innerHTML = `
+    <section class="hunt">
+      <button class="back" id="back">← ${t('back')}</button>
+      <span class="badge"><i></i>${t('badgeLocal')}</span>
+      <h1 class="hunt-title">${t('huntTitle', `<span class="grad mono">${esc(patternLabel(h.job))}</span>`)}</h1>
+      <p class="lead center">${t('huntSub', esc(state.device.name))}</p>
+      <div class="hunt-card">
+        <div class="state ${h.paused ? 'paused' : ''}"><i></i>${h.paused ? t('paused') : t('running')}</div>
+        <div class="big mono" id="h-checked">0</div>
+        <div class="muted">${t('checked')}</div>
+        <div class="bar"><i id="h-bar"></i></div>
+        <div class="stats">
+          <div><span>${t('speed')}</span><b class="mono" id="h-speed">—</b></div>
+          <div><span>${t('time')}</span><b class="mono" id="h-time">00:00</b></div>
+          <div><span>${t('eta')}</span><b id="h-eta">—</b></div>
+          <div><span>${t('chance')}</span><b class="mono" id="h-chance">0%</b></div>
+        </div>
+        <div class="candidate">
+          <span class="k">${t('lastCandidate')}</span>
+          <div class="mono" id="h-sample">—</div>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="btn ghost" id="pause">${h.paused ? '▶ ' + t('resume') : '❚❚ ' + t('pause')}</button>
+        <div class="power small-power">${POWER_LEVELS.map(
+          (p) => `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}">${Math.round(p * 100)}%</button>`,
+        ).join('')}</div>
+        <button class="btn ghost danger" id="stop">■ ${t('stop')}</button>
+      </div>
+      <p class="note center">ⓘ ${t('randomNote')}<br>${t('notifyHint')}</p>
+    </section>`;
+  $('#back').onclick = stopHunt;
+  $('#stop').onclick = stopHunt;
+  $('#pause').onclick = togglePause;
+  document.querySelectorAll('.small-power [data-p]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        prefs.power = Number(b.dataset.p);
+        savePrefs();
+        if (miner) miner.power = prefs.power;
+        document.querySelectorAll('.small-power [data-p]').forEach((x) => x.classList.toggle('on', x === b));
+      }),
+  );
+  renderHuntLive();
+}
+
+function renderHuntLive() {
+  const h = state.hunt;
+  if (!h || state.view !== 'hunt') return;
+  const elapsed = (h.activeMs + (h.paused ? 0 : performance.now() - h.runStarted)) / 1000;
+  const chance = 1 - Math.exp(-h.checked * h.p);
+  const rate = h.rate || effectiveRate();
+  $('#h-checked').textContent = fmtInt(h.checked);
+  $('#h-speed').textContent = `${fmtRate(h.rate)}${lang === 'ru' ? '/с' : '/s'}`;
+  $('#h-time').textContent = fmtClock(elapsed);
+  $('#h-eta').textContent = rate ? fmtDur(Math.LN2 / h.p / rate) : '—';
+  $('#h-chance').textContent = `${Math.min(99, Math.floor(chance * 100))}%`;
+  $('#h-bar').style.width = `${(chance * 100).toFixed(1)}%`;
+  if (h.sample) $('#h-sample').innerHTML = addrHtml(h.sample, h.job, 'ghost-hl');
+  document.title = `${fmtCompact(h.checked)} · ${patternLabel(h.job)} — Fancy`;
+}
+
+// ---------------- находка ----------------
+
+function renderFoundView() {
+  const h = state.hunt;
+  const f = state.found.find((x) => x.address === h.found);
+  $('#view').innerHTML = `
+    <section class="hunt found-view">
+      <span class="badge"><i></i>${t('badgeLocal')}</span>
+      <h1 class="hunt-title grad">${t('foundTitle')}</h1>
+      <p class="lead center">${t('foundSub', esc(patternLabel(h.job)), fmtInt(h.checked))}</p>
+      <div class="found-big mono">${addrHtml(h.found, h.job)}</div>
+      <div class="controls">
+        <button class="cta" id="claim">${t('toClaim')}</button>
+      </div>
+      <div class="controls">
+        <button class="btn ghost" id="copyf">${t('copyAddr')}</button>
+        <button class="btn ghost" id="again">${t('searchAgain')}</button>
+      </div>
+    </section>`;
+  $('#claim').onclick = () => openClaim(f.address);
+  $('#copyf').onclick = (e) => copy(h.found, e.target);
+  $('#again').onclick = () => {
+    state.hunt = null;
+    state.view = 'home';
+    document.title = 'Fancy';
+    render();
+  };
 }
 
 // ---------------- оформление: 24 слова → пополнение → смена ключа → импорт ----------------
@@ -512,92 +857,90 @@ function renderFound() {
 let claimTimer = null;
 
 function openClaim(address) {
-  state.claim = address;
   const f = state.found.find((x) => x.address === address);
+  if (!f) return;
   if (!f.signing) {
     // вторая половина фразы — тоже только в этом браузере
     f.signing = generateMnemonic(WORDLIST, 128).split(' ');
     saveFound();
   }
-  renderClaim();
-  $('#claim-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-function closeClaim() {
-  state.claim = null;
-  clearInterval(claimTimer);
-  $('#claim-wrap').innerHTML = '';
+  state.claim = address;
+  state.claimUi = { address, revealed: false, wrote: f.status !== 'found', busy: false, msg: '' };
+  state.hunt = null;
+  state.view = 'claim';
+  document.title = 'Fancy';
+  render();
+  window.scrollTo({ top: 0 });
 }
 
 function wordsGrid(words, offset, hidden) {
-  return `<ol class="words ${hidden ? 'hidden' : ''}" start="${offset + 1}">${words
+  return `<ol class="words ${hidden ? 'hidden' : ''}">${words
     .map((w, i) => `<li><span class="n">${offset + i + 1}</span><span class="w mono">${esc(w)}</span></li>`)
     .join('')}</ol>`;
 }
 
-async function renderClaim() {
+function renderClaim() {
   clearInterval(claimTimer);
   const f = state.found.find((x) => x.address === state.claim);
-  const el = $('#claim-wrap');
-  if (!f) return closeClaim();
-  const ui = (state.claimUi ??= {});
-  if (ui.address !== f.address) Object.assign(ui, { address: f.address, revealed: false, wrote: f.status !== 'found' ? true : false, info: null, busy: false, msg: '' });
+  if (!f) {
+    state.view = 'home';
+    return render();
+  }
+  const ui = state.claimUi;
+  const step = f.status === 'switched' ? 3 : ui.wrote ? 2 : 1;
+  const link = `ton://transfer/${f.address}?amount=50000000`;
+  const end = f.suffix ? f.address.slice(-Math.max(4, f.suffix.length)) : f.address.slice(-4);
 
-  const step = f.status === 'switched' ? 4 : ui.wrote ? 2 : 1;
-  const amount = '0.05';
-  const nano = 50_000_000;
-  const link = `ton://transfer/${f.address}?amount=${nano}`;
-  const net = f.network;
-
-  el.innerHTML = `
-    <div class="card claim">
-      <div class="claim-head">
-        <h2>Оформление <span class="mono">${highlight(f.address, f.pattern, f.type)}</span></h2>
-        <button class="btn small ghost" id="claim-close">Свернуть</button>
-      </div>
+  $('#view').innerHTML = `
+    <section class="claim">
+      <button class="back" id="back">← ${t('back')}</button>
+      <h1 class="hunt-title">${t('claimTitle')}</h1>
+      <div class="found-big mono">${addrHtml(f.address, f)}</div>
 
       <div class="step ${step === 1 ? 'active' : 'done'}">
-        <h3><span class="sn">1</span> Запишите 24 слова</h3>
-        <p class="muted">Слова 1–12 нашёл поиск — они задают адрес. Слова 13–24 только что создал ваш браузер — на них переключится ключ кошелька. Запишите все 24 по порядку, на бумаге, без скриншотов.</p>
+        <h3><span class="sn">1</span>${t('s1')}</h3>
+        <p class="muted">${t('s1text')}</p>
         <div class="words-wrap">
-          <div><div class="label">Слова 1–12 · anchor</div>${wordsGrid(f.anchor, 0, !ui.revealed)}</div>
-          <div><div class="label">Слова 13–24 · signing</div>${wordsGrid(f.signing, 12, !ui.revealed)}</div>
+          <div><div class="label">${t('anchorLabel')}</div>${wordsGrid(f.anchor, 0, !ui.revealed)}</div>
+          <div><div class="label">${t('signingLabel')}</div>${wordsGrid(f.signing, 12, !ui.revealed)}</div>
         </div>
-        <div class="actions">
-          ${ui.revealed ? `<button class="btn small ghost" id="copy24">Скопировать 24 слова</button>` : `<button class="btn small" id="reveal">Показать — убедитесь, что никто не смотрит</button>`}
-          ${step === 1 && ui.revealed ? `<label class="check"><input type="checkbox" id="wrote"> Я записал все 24 слова по порядку</label>` : ''}
+        <div class="row-actions">
+          ${ui.revealed ? `<button class="btn ghost" id="copy24">${t('copy24')}</button>` : `<button class="btn" id="reveal">${t('reveal')}</button>`}
+          ${step === 1 && ui.revealed ? `<label class="check"><input type="checkbox" id="wrote"> ${t('wrote')}</label>` : ''}
         </div>
       </div>
 
       <div class="step ${step === 2 ? 'active' : step > 2 ? 'done' : 'locked'}">
-        <h3><span class="sn">2</span> Пополните адрес и смените ключ</h3>
-        <p class="muted">Отправьте около <b>${amount} GRAM</b> на найденный адрес из любого кошелька — этим оплачивается развёртывание контракта. Остаток останется на кошельке.</p>
+        <h3><span class="sn">2</span>${t('s2')}</h3>
+        <p class="muted">${t('s2text', '0.05')}</p>
         <div class="fund">
           <code class="mono">${esc(f.address)}</code>
-          <button class="btn small ghost" id="copy-addr">Копировать</button>
-          ${net === 'mainnet' ? `<a class="btn small ghost" href="${esc(link)}">Открыть в кошельке</a>` : ''}
+          <button class="btn ghost" id="copy-addr">${t('copyAddr')}</button>
+          ${f.network === 'mainnet' ? `<a class="btn ghost" href="${esc(link)}">${t('openWallet')}</a>` : ''}
         </div>
-        <div id="chain" class="chain muted">${step >= 2 ? 'Проверяем баланс…' : ''}</div>
-        <div class="actions">
-          <button class="btn" id="switch" disabled>Сменить ключ на мои 24 слова</button>
-        </div>
-        <div class="msg">${esc(ui.msg || '')}</div>
+        <div id="chain" class="muted small">${step === 2 ? t('checkingChain') : ''}</div>
+        <div class="row-actions"><button class="cta inline" id="switch" disabled>${t('switchKey')}</button></div>
+        <div class="msg" id="msg">${esc(ui.msg || '')}</div>
       </div>
 
-      <div class="step ${step === 4 ? 'active' : 'locked'}">
-        <h3><span class="sn">3</span> Импорт в Telegram Wallet</h3>
-        <ol class="import">
-          <li>Telegram → Wallet → <b>Импортировать кошелёк</b>, 24 слова.</li>
-          <li>Введите слова <b>в показанном порядке</b> — с 1 по 24.</li>
-          <li>Проверьте, что адрес в Wallet заканчивается на <b class="mono">${esc(f.address.slice(-Math.max(4, f.pattern.length)))}</b>.</li>
-        </ol>
-        ${f.status === 'switched' ? `<p class="ok">Ключ сменён: публичный ключ кошелька совпадает с вашими 24 словами. С этого момента слова 1–12 сами по себе ничего не могут.</p>
-        <p class="muted small">После импорта в Wallet удалите запись кнопкой «Удалить» в списке — так фраза не останется в этом браузере.</p>
-        <a class="btn small ghost" target="_blank" rel="noopener" href="https://${net === 'testnet' ? 'testnet.' : ''}tonviewer.com/${esc(f.address)}">Посмотреть в эксплорере</a>` : ''}
+      <div class="step ${step === 3 ? 'active' : 'locked'}">
+        <h3><span class="sn">3</span>${t('s3')}</h3>
+        <ol class="import"><li>${t('import1')}</li><li>${t('import2')}</li><li>${t('import3', esc(end))}</li></ol>
+        ${
+          f.status === 'switched'
+            ? `<p class="ok">${t('switchedOk')}</p>
+          <div class="row-actions"><a class="btn ghost" target="_blank" rel="noopener" href="https://${f.network === 'testnet' ? 'testnet.' : ''}tonviewer.com/${esc(f.address)}">${t('explorer')}</a></div>
+          <p class="muted small">${t('afterImport')}</p>`
+            : ''
+        }
       </div>
-    </div>`;
+    </section>`;
 
-  $('#claim-close').onclick = closeClaim;
+  $('#back').onclick = () => {
+    clearInterval(claimTimer);
+    state.view = 'home';
+    render();
+  };
   $('#reveal') && ($('#reveal').onclick = () => ((ui.revealed = true), renderClaim()));
   $('#copy24') && ($('#copy24').onclick = (e) => copy([...f.anchor, ...f.signing].join(' '), e.target));
   $('#wrote') &&
@@ -616,10 +959,8 @@ async function renderClaim() {
 
 async function pollChain(f) {
   const ui = state.claimUi;
-  if (ui.busy) return;
+  if (ui.busy || state.view !== 'claim') return;
   const api = new Toncenter(f.network, prefs.apiKey);
-  const el = $('#chain');
-  const btn = $('#switch');
   try {
     const st = await api.getState(f.address);
     const signing = await wordsToWallet(f.signing, f.network);
@@ -628,23 +969,23 @@ async function pollChain(f) {
     if (onchainKey && onchainKey === bytesToHex(signing.publicKey)) {
       f.status = 'switched';
       saveFound();
-      renderFound();
       return renderClaim();
     }
-    ui.info = st;
     if (st.balance > 0n && f.status === 'found') {
       f.status = 'funded';
       saveFound();
-      renderFound();
     }
     const enough = st.balance >= 10_000_000n;
+    const el = $('#chain');
     if (el)
-      el.innerHTML = `Баланс: <b class="mono">${formatGram(st.balance)} GRAM</b> · контракт: ${
-        st.state === 'active' ? 'развёрнут' : 'ещё не развёрнут'
-      }${enough ? '' : ' · ждём пополнения…'}`;
+      el.innerHTML = `${t('balance')}: <b class="mono">${formatGram(st.balance)} GRAM</b> · ${t('contract')}: ${
+        st.state === 'active' ? t('deployed') : t('notDeployed')
+      }${enough ? '' : ' · ' + t('waitingFunds')}`;
+    const btn = $('#switch');
     if (btn) btn.disabled = !enough || st.state === 'frozen';
   } catch (e) {
-    if (el) el.textContent = 'Не удалось связаться с toncenter: ' + (e.message || e) + '. Повторим через несколько секунд.';
+    const el = $('#chain');
+    if (el) el.textContent = t('netError', e.message || e);
   }
 }
 
@@ -654,17 +995,17 @@ async function switchKey(f) {
   ui.busy = true;
   const btn = $('#switch');
   btn.disabled = true;
-  btn.textContent = 'Отправляем…';
+  btn.textContent = t('sending');
   const setMsg = (m) => {
     ui.msg = m;
-    const el = $('.step.active .msg') || $('.msg');
+    const el = $('#msg');
     if (el) el.textContent = m;
   };
   try {
     const api = new Toncenter(f.network, prefs.apiKey);
     const anchor = await wordsToWallet(f.anchor, f.network);
     const signing = await wordsToWallet(f.signing, f.network);
-    if (anchor.address !== f.address) throw new Error('слова 1–12 не дают этот адрес — запись повреждена');
+    if (anchor.address !== f.address) throw new Error(t('errAnchor'));
 
     const st = await api.getState(f.address);
     let seqno = 0;
@@ -676,13 +1017,12 @@ async function switchKey(f) {
         f.status = 'switched';
         saveFound();
         ui.busy = false;
-        renderFound();
         return renderClaim();
       }
-      if (key !== bytesToHex(anchor.publicKey)) throw new Error('в контракте чужой ключ — продолжать нельзя');
+      if (key !== bytesToHex(anchor.publicKey)) throw new Error(t('errForeignKey'));
       seqno = Number(await api.getNumber(f.address, 'seqno'));
     } else if (st.state !== 'uninitialized') {
-      throw new Error(`состояние аккаунта: ${st.state}`);
+      throw new Error(t('errState', st.state));
     }
 
     const { boc } = buildDeployAndRotate({
@@ -695,7 +1035,7 @@ async function switchKey(f) {
       deploy,
     });
     await api.sendBoc(boc);
-    setMsg('Транзакция отправлена. Ждём подтверждения в сети (обычно 5–20 секунд)…');
+    setMsg(t('sent'));
 
     const deadline = Date.now() + 120_000;
     while (Date.now() < deadline) {
@@ -707,17 +1047,16 @@ async function switchKey(f) {
           saveFound();
           ui.busy = false;
           ui.msg = '';
-          renderFound();
           return renderClaim();
         }
       } catch {
         /* контракт ещё не появился — ждём */
       }
     }
-    throw new Error('подтверждение не пришло за 2 минуты. Проверьте адрес в эксплорере и нажмите кнопку ещё раз');
+    throw new Error(t('errTimeout'));
   } catch (e) {
-    setMsg('Ошибка: ' + (e.message || e));
-    btn.textContent = 'Сменить ключ на мои 24 слова';
+    setMsg(t('errPrefix') + (e.message || e));
+    btn.textContent = t('switchKey');
     btn.disabled = false;
   } finally {
     ui.busy = false;
@@ -726,10 +1065,7 @@ async function switchKey(f) {
 
 // ---------------- старт ----------------
 
-if (import.meta.env.DEV) window.__vanity = { GpuMiner, gpuMiner, cpuMiner, state };
+if (import.meta.env.DEV) window.__fancy = { state, prefs, get miner() { return miner; } };
 
-renderShell();
-renderDevice();
-renderBuilder();
-renderFound();
+render();
 detectDevice();

@@ -14,6 +14,8 @@ import {
   indicesToWords,
   wordsToWallet,
   makeMatcher,
+  matchProbability,
+  validateJob,
   bytesToHex,
   indicesToPhraseBytes,
   phraseBytesToSeed,
@@ -67,10 +69,18 @@ for (let n = 0; n < 5; n++) {
   assert.equal(bytesToHex(phraseBytesToSeedSync(ph)), bytesToHex(await phraseBytesToSeed(ph)));
 }
 
-// 3) матчер
-assert.ok(makeMatcher('Split', 'suffix', true)('UQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxSPLIT'));
-assert.ok(!makeMatcher('Split', 'suffix', false)('UQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxSPLIT'));
-assert.ok(makeMatcher('Dog', 'prefix', false)('UQDogxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'));
+// 3) матчер и вероятность: конец, начало, оба сразу
+const A = 'UQDogxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxSPLIT';
+assert.ok(makeMatcher({ suffix: 'Split', caseInsensitive: true })(A));
+assert.ok(!makeMatcher({ suffix: 'Split', caseInsensitive: false })(A));
+assert.ok(makeMatcher({ prefix: 'Dog', caseInsensitive: false })(A));
+assert.ok(makeMatcher({ prefix: 'dog', suffix: 'split', caseInsensitive: true })(A));
+assert.ok(!makeMatcher({ prefix: 'Dog', suffix: 'SPLIX', caseInsensitive: true })(A));
+assert.equal(matchProbability({ suffix: 'ab', caseInsensitive: false }), 1 / 4096);
+assert.equal(matchProbability({ prefix: 'D1', suffix: '1', caseInsensitive: true }), (1 / 4) * (1 / 64) * (1 / 64));
+assert.equal(validateJob({ prefix: 'dog', suffix: '', caseInsensitive: false }).prefix, 'prefix3');
+assert.ok(validateJob({ prefix: 'dog', suffix: 'x', caseInsensitive: true }).ok);
+assert.equal(validateJob({ prefix: '', suffix: '', caseInsensitive: true }).empty, 'empty');
 
 // 4) сообщение деплоя + смены ключа: структура и подписи
 {

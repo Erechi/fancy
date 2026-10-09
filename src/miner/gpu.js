@@ -15,6 +15,7 @@ import {
   indicesToWords,
   wordsToWallet,
   makeMatcher,
+  patternPositions,
 } from '../core/fast.js';
 
 const K512 = [
@@ -48,6 +49,32 @@ const K256 = [
 
 const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const MAX_RESULTS = 64;
+
+// Таймеры свёрнутой вкладки Chrome растягивает до секунды и больше, а таймеры воркера — нет.
+let timerWorker;
+function sleep(ms) {
+  try {
+    if (!timerWorker) {
+      const src = 'onmessage = (e) => setTimeout(() => postMessage(e.data[0]), e.data[1]);';
+      const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      const pending = new Map();
+      let id = 0;
+      w.onmessage = (e) => {
+        pending.get(e.data)?.();
+        pending.delete(e.data);
+      };
+      timerWorker = (t) =>
+        new Promise((r) => {
+          pending.set(++id, r);
+          w.postMessage([id, t]);
+        });
+    }
+    // страховка: если воркер не ответит (например, его запретил CSP), не зависаем
+    return Promise.race([timerWorker(ms), new Promise((r) => setTimeout(r, ms + 1500))]);
+  } catch {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+}
 const TARGET_MS = 220;
 
 function k512Buffer() {
@@ -119,19 +146,25 @@ function tableBuffer() {
   return u;
 }
 
-function patternSextets(text, caseInsensitive) {
-  const a = new Uint32Array(8);
-  const b = new Uint32Array(8);
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (caseInsensitive && /[A-Za-z]/.test(c)) {
-      a[i] = B64URL.indexOf(c.toUpperCase());
-      b[i] = B64URL.indexOf(c.toLowerCase());
-    } else {
-      a[i] = b[i] = B64URL.indexOf(c);
-    }
+/** Позиции и 6-битные значения символов шаблона для шейдера (до 16 позиций). */
+function patternUniform(job) {
+  const pos = patternPositions(job);
+  const out = { len: pos.length, pos: new Uint32Array(16), a: new Uint32Array(16), b: new Uint32Array(16) };
+  pos.forEach(({ index, alts }, i) => {
+    out.pos[i] = index;
+    out.a[i] = B64URL.indexOf(alts[0]);
+    out.b[i] = B64URL.indexOf(alts[alts.length - 1]);
+  });
+  return out;
+}
+
+function toBase64Url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    s += B64URL[n >>> 18] + B64URL[(n >>> 12) & 63] + B64URL[(n >>> 6) & 63] + B64URL[n & 63];
   }
-  return { a, b };
+  return s;
 }
 
 function entropyBytes(w0, w1, w2, w3) {
@@ -188,8 +221,9 @@ export class GpuMiner {
 
   #makeSlot(debugBytes = 256) {
     const d = this.device;
-    const params = d.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const outSize = 16 + MAX_RESULTS * 16;
+    const params = d.createBuffer({ size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // счётчик + находки + 9 слов «последнего кандидата»
+    const outSize = 16 + MAX_RESULTS * 16 + 9 * 4;
     const out = d.createBuffer({
       size: outSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
@@ -213,16 +247,16 @@ export class GpuMiner {
 
   #encode(slot, { base, count, net, pattern, mode = 0, dbgRead = null }) {
     const d = this.device;
-    const u = new Uint32Array(28);
+    const u = new Uint32Array(60);
     u.set(base, 0);
     u[4] = net.subwalletId;
     u[5] = net.testOnly ? 0xd1 : 0x51;
-    u[6] = pattern.start;
-    u[7] = pattern.len;
-    u[8] = mode;
-    u[9] = count;
-    u.set(pattern.a, 12);
-    u.set(pattern.b, 20);
+    u[6] = pattern.len;
+    u[7] = mode;
+    u[8] = count;
+    u.set(pattern.pos, 12);
+    u.set(pattern.a, 28);
+    u.set(pattern.b, 44);
     d.queue.writeBuffer(slot.params, 0, u);
     d.queue.writeBuffer(slot.out, 0, new Uint32Array(4));
     const enc = d.createCommandEncoder();
@@ -248,7 +282,7 @@ export class GpuMiner {
     const base = crypto.getRandomValues(new Uint32Array(4));
     const net = NETWORKS.mainnet;
     // шаблон длины 0 совпадает всегда — заодно проверяем возврат находок
-    const pattern = { start: 0, len: 0, a: new Uint32Array(8), b: new Uint32Array(8) };
+    const pattern = { len: 0, pos: new Uint32Array(16), a: new Uint32Array(16), b: new Uint32Array(16) };
     this.#encode(slot, { base, count: n, net, pattern, mode: 1, dbgRead });
     await Promise.all([slot.read.mapAsync(GPUMapMode.READ), dbgRead.mapAsync(GPUMapMode.READ)]);
     const dbg = new Uint32Array(dbgRead.getMappedRange().slice(0));
@@ -289,14 +323,15 @@ export class GpuMiner {
   }
 
   /**
-   * Майнинг до первой находки или stop(). onProgress(checked, rate), onFound({words, address}).
+   * Майнинг до первой находки или stop(). onProgress(checked, rate, sampleAddress), onFound({words, address}).
+   * this.power (0..1] можно менять на ходу: GPU простаивает долю времени, чтобы не грузить систему.
    */
-  async run({ text, type, caseInsensitive, network }, onProgress, onFound) {
+  async run(job, onProgress, onFound) {
     this.running = true;
+    const { network } = job;
     const net = NETWORKS[network];
-    const sx = patternSextets(text, caseInsensitive);
-    const pattern = { start: type === 'suffix' ? 48 - text.length : 2, len: text.length, a: sx.a, b: sx.b };
-    const match = makeMatcher(text, type, caseInsensitive);
+    const pattern = patternUniform(job);
+    const match = makeMatcher(job);
     let count = 8192;
     let checked = 0;
     let lastDone = performance.now();
@@ -312,6 +347,10 @@ export class GpuMiner {
       const dt = now - lastDone;
       lastDone = now;
       checked += n;
+      const sb = new Uint8Array(36);
+      const sv = new DataView(sb.buffer);
+      for (let j = 0; j < 9; j++) sv.setUint32(4 * j, r[4 + MAX_RESULTS * 4 + j]);
+      const sample = toBase64Url(sb);
       const hits = Math.min(r[0], MAX_RESULTS);
       for (let h = 0; h < hits; h++) {
         const ent = entropyBytes(r[4 + h * 4], r[5 + h * 4], r[6 + h * 4], r[7 + h * 4]);
@@ -320,24 +359,40 @@ export class GpuMiner {
         // доверяем только тому, что подтвердил CPU
         if (match(w.address)) onFound({ words, address: w.address });
       }
-      return { dt, n };
+      return { dt, n, sample };
+    };
+
+    // один запуск забран: прогресс, подстройка размера и пауза при сниженной нагрузке
+    const step = async ({ slot, n }, power) => {
+      const { dt, sample } = await collect(slot, n);
+      const idle = power < 1 ? (dt * (1 - power)) / power : 0;
+      onProgress(checked, (n / (dt + idle)) * 1000, sample);
+      // подгоняем размер запуска под ~220 мс, чтобы не ловить таймаут драйвера
+      const k = Math.max(0.5, Math.min(2, TARGET_MS / Math.max(dt, 1)));
+      count = Math.max(1024, Math.min(maxCount, Math.round((count * k) / 1024) * 1024));
+      if (idle) await sleep(idle);
     };
 
     try {
       while (this.running) {
+        const power = Math.min(1, Math.max(0.1, this.power ?? 1));
         const slot = this.slots[i++ & 1];
-        const base = crypto.getRandomValues(new Uint32Array(4));
         const n = count;
-        this.#encode(slot, { base, count: n, net, pattern });
-        const cur = { slot, n };
-        if (prev) {
-          const { dt } = await collect(prev.slot, prev.n);
-          onProgress(checked, (prev.n / dt) * 1000);
-          // подгоняем размер запуска под ~220 мс, чтобы не ловить таймаут драйвера
-          const k = Math.max(0.5, Math.min(2, TARGET_MS / Math.max(dt, 1)));
-          count = Math.max(1024, Math.min(maxCount, Math.round((count * k) / 1024) * 1024));
+        if (power >= 1) {
+          // конвейер: пока GPU считает этот запуск, забираем предыдущий
+          this.#encode(slot, { base: crypto.getRandomValues(new Uint32Array(4)), count: n, net, pattern });
+          if (prev) await step(prev, 1);
+          prev = { slot, n };
+        } else {
+          // со сниженной нагрузкой — строго по очереди, иначе в паузе GPU досчитывает следующий запуск
+          if (prev) {
+            await step(prev, 1);
+            prev = null;
+          }
+          lastDone = performance.now();
+          this.#encode(slot, { base: crypto.getRandomValues(new Uint32Array(4)), count: n, net, pattern });
+          await step({ slot, n }, power);
         }
-        prev = cur;
         if (this.lost) throw new Error(this.lost);
       }
       if (prev) await collect(prev.slot, prev.n);

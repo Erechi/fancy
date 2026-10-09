@@ -7,14 +7,15 @@ struct Params {
   base: vec4<u32>,      // случайная энтропия от CPU, своя на каждый запуск
   subwallet: u32,
   flag: u32,            // 0x51 (UQ…) или 0xd1 (testnet, 0Q…)
-  patStart: u32,        // индекс первого символа шаблона в 48-символьном адресе
-  patLen: u32,
+  patLen: u32,          // число проверяемых символов (начало + конец), до 16
   mode: u32,            // 0 — майнинг, 1 — отладка (пишем промежуточные значения)
   count: u32,           // число кандидатов в этом запуске
   p0: u32,
   p1: u32,
-  patA: array<vec4<u32>, 2>,   // допустимый 6-битный символ для каждой позиции
-  patB: array<vec4<u32>, 2>,   // второй допустимый (другой регистр) или тот же
+  p2: u32,
+  patPos: array<vec4<u32>, 4>, // индекс символа в 48-символьном адресе
+  patA: array<vec4<u32>, 4>,   // допустимый 6-битный символ для позиции
+  patB: array<vec4<u32>, 4>,   // второй допустимый (другой регистр) или тот же
 }
 
 struct Out {
@@ -502,6 +503,13 @@ fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups)
   ab[34] = crc >> 8u;
   ab[35] = crc & 0xffu;
 
+  // один «живой» кандидат на запуск — для экрана поиска («последний кандидат»)
+  if (gid == 0u) {
+    for (var j = 0u; j < 9u; j++) {
+      OUT.results[MAX_RESULTS * 4u + j] = (ab[4u * j] << 24u) | (ab[4u * j + 1u] << 16u) | (ab[4u * j + 2u] << 8u) | ab[4u * j + 3u];
+    }
+  }
+
   if (P.mode == 1u) {
     let base = gid * 40u;
     for (var i = 0u; i < 8u; i++) { DBG[base + 2u * i] = t[i].x; DBG[base + 2u * i + 1u] = t[i].y; }
@@ -513,7 +521,7 @@ fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups)
   }
 
   for (var p = 0u; p < P.patLen; p++) {
-    let ci = P.patStart + p;
+    let ci = P.patPos[p >> 2u][p & 3u];
     let g = (ci >> 2u) * 3u;
     let n = (ab[g] << 16u) | (ab[g + 1u] << 8u) | ab[g + 2u];
     let sx = (n >> (18u - 6u * (ci & 3u))) & 63u;

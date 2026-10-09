@@ -5,11 +5,10 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 // Fetch/XHR разрешены только к toncenter; это страховка на случай будущей XSS, а не полная защита от утечки.
 const CSP = [
   "default-src 'none'",
-  "script-src 'self' 'unsafe-inline' blob:",
-  "worker-src 'self' blob:",
+  "script-src 'self' 'unsafe-inline'",
+  'worker-src blob:',
   'connect-src https://toncenter.com https://testnet.toncenter.com',
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  'font-src https://fonts.gstatic.com',
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "base-uri 'none'",
   "form-action 'none'",
@@ -26,6 +25,5 @@ const cspPlugin = {
 export default defineConfig({
   plugins: [viteSingleFile(), cspPlugin],
   server: { port: 5178, host: '127.0.0.1', strictPort: true },
-  worker: { format: 'es' },
   define: { global: 'globalThis' },
 });
