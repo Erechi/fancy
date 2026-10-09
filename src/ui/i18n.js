@@ -136,7 +136,7 @@ const ru = {
   ],
   faqTitle: 'Вопросы',
   faq: [
-    ['Почему это бесплатно, а vanity.tg берёт деньги?', 'Потому что мы не продаём вам вашу же видеокарту. vanity.tg ищет адреса на своей видеокарте и берёт за это деньги, а Fancy даёт работу вашей. Платить не за что — разве что 0.1 GRAM за активацию кошелька, и те почти целиком остаются у вас.'],
+    ['Почему это бесплатно, а vanity.tg берёт деньги?', 'Потому что мы на этом не зарабатываем. vanity.tg берёт плату за каждый найденный адрес — это его бизнес. Fancy делает то же самое прямо в вашем браузере, на вашей видеокарте, и денег не берёт. Платите только 0.1 GRAM за активацию кошелька — и те почти целиком остаются у вас.'],
     ['Зачем нужно пополнять адрес?', 'Найденный адрес — пока только вычисленное место в блокчейне. Сам кошелёк-контракт появляется после первой транзакции, а оплачивает её сам кошелёк. Поэтому сначала на него нужно отправить 0.1 GRAM. Комиссия сети — около 0.001 GRAM, остальное остаётся на вашем кошельке.'],
     ['Можно ли закрыть вкладку или свернуть окно во время поиска?', 'Свернуть окно или переключиться на другую вкладку можно — поиск продолжится. Закрывать вкладку нельзя: поиск остановится. Найденные адреса сохраняются, а начать заново не хуже — каждая попытка случайна, накопленный «прогресс» ничего не даёт.'],
     ['Подойдёт ли адрес для Tonkeeper, MyTonWallet и других кошельков?', 'Нет. Адрес вычислен для контракта Telegram Wallet (WalletTg), а Tonkeeper, MyTonWallet и другие используют контракты v4/v5 — по тем же 24 словам они покажут другой, пустой адрес. Импортируйте слова именно в Telegram → Wallet. Отправлять GRAM на ваш адрес можно из любого кошелька.'],
@@ -314,7 +314,7 @@ const en = {
   ],
   faqTitle: 'FAQ',
   faq: [
-    ['Why is it free while vanity.tg charges?', 'Because we do not sell you your own GPU. vanity.tg searches on its own GPU and charges for it, while Fancy puts yours to work. There is nothing to pay for — except 0.1 GRAM to activate the wallet, and almost all of it stays with you.'],
+    ['Why is it free while vanity.tg charges?', 'Because we do not make money on it. vanity.tg charges for every address it finds — that is its business. Fancy does the same right in your browser, on your GPU, and charges nothing. You only pay 0.1 GRAM to activate the wallet — and almost all of it stays with you.'],
     ['Why do I need to top up the address?', 'A found address is just a computed spot on the blockchain. The wallet contract appears after the first transaction, and that transaction is paid by the wallet itself. So first send 0.1 GRAM to it. The network fee is about 0.001 GRAM, the rest stays in your wallet.'],
     ['Can I close the tab or minimize the window while searching?', 'Minimizing the window or switching tabs is fine — the search continues. Closing the tab stops it. Found addresses stay saved, and starting over is no worse — every attempt is random, accumulated "progress" means nothing.'],
     ['Will the address work in Tonkeeper, MyTonWallet and other wallets?', 'No. The address is computed for the Telegram Wallet contract (WalletTg), while Tonkeeper, MyTonWallet and others use v4/v5 contracts — the same 24 words would show a different, empty address there. Import the words into Telegram → Wallet. Anyone can send GRAM to your address from any wallet.'],
