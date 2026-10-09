@@ -20,6 +20,9 @@ const REPO_URL = '';
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const POWER_LEVELS = [0.25, 0.5, 0.75, 1];
 const RECOMMENDED_POWER = 0.75;
+/** Сколько просим отправить на активацию. Реальная комиссия деплоя и смены ключа ≈ 0.0007 GRAM. */
+const ACTIVATION_GRAM = '0.1';
+const ACTIVATION_NANO = 100_000_000;
 const CHIPS = {
   suffix: ['GRAM', 'TON', 'FANCY', 'LUCKY', '777', '1337'],
   prefix: ['Dog', 'Cat', 'Ace', 'Boss', 'Bro', 'D1'],
@@ -429,6 +432,10 @@ function renderHome() {
         <span class="badge"><i></i>${t('badgeLocal')}</span>
         <h1>${t('heroTitle')[0]}<br><span class="grad">${t('heroTitle')[1]}</span></h1>
         <p class="lead">${t('heroLead')}</p>
+        <div class="price">${t('price')
+          .map(([k, v], i) => `<div class="${i === 1 ? 'hl' : ''}"><span>${k}</span><b>${v}</b></div>`)
+          .join('')}</div>
+        <p class="price-note">${t('priceNote')}</p>
         <ul class="points">${t('heroPoints').map((p) => `<li>${p}</li>`).join('')}</ul>
         <div class="showcase mono" id="showcase"></div>
         <div class="live" id="live"></div>
@@ -880,7 +887,7 @@ function renderClaim() {
   }
   const ui = state.claimUi;
   const step = f.status === 'switched' ? 3 : ui.wrote ? 2 : 1;
-  const link = `ton://transfer/${f.address}?amount=50000000`;
+  const link = `ton://transfer/${f.address}?amount=${ACTIVATION_NANO}`;
   const end = f.suffix ? f.address.slice(-Math.max(4, f.suffix.length)) : f.address.slice(-4);
 
   $('#view').innerHTML = `
@@ -904,7 +911,7 @@ function renderClaim() {
 
       <div class="step ${step === 2 ? 'active' : step > 2 ? 'done' : 'locked'}">
         <h3><span class="sn">2</span>${t('s2')}</h3>
-        <p class="muted">${t('s2text', '0.05')}</p>
+        <p class="muted">${t('s2text', ACTIVATION_GRAM)}</p>
         <div class="fund">
           <code class="mono">${esc(f.address)}</code>
           <button class="btn ghost" id="copy-addr">${t('copyAddr')}</button>
