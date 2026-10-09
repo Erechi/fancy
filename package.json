@@ -31,5 +31,13 @@
     "micro-key-producer": "^0.10.2",
     "vite": "^8.3.4",
     "vite-plugin-singlefile": "^2.3.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Erechi/fancy.git"
+  },
+  "homepage": "https://github.com/Erechi/fancy",
+  "bugs": {
+    "url": "https://github.com/Erechi/fancy/issues"
   }
 }
