@@ -46,7 +46,6 @@ const store = {
 };
 
 const K_FOUND = 'fancy.found.v1';
-const K_HISTORY = 'fancy.history.v1';
 const K_PREFS = 'fancy.prefs.v1';
 
 function loadFound() {
@@ -68,17 +67,15 @@ const prefs = Object.assign(
 );
 
 const state = {
-  view: 'home', // home | hunt | found | claim
+  view: 'home', // home | found | claim
   device: { status: 'checking', name: '', error: null, rate: 0 },
   hunt: null,
   found: loadFound(),
-  history: store.get(K_HISTORY, []),
   claim: null,
   claimUi: null,
 };
 
 const saveFound = () => store.set(K_FOUND, state.found);
-const saveHistory = () => store.set(K_HISTORY, state.history.slice(0, 30));
 const savePrefs = () => store.set(K_PREFS, prefs);
 
 let miner = null;
@@ -274,7 +271,7 @@ async function benchmark(ms = 3500) {
   return tail[Math.floor(tail.length / 2)] || samples.at(-1) || 0;
 }
 
-// ---------------- поиск ----------------
+// ---------------- поиск (идёт прямо на главной) ----------------
 
 function startHunt() {
   const job = currentJob();
@@ -292,11 +289,9 @@ function startHunt() {
     paused: false,
     found: null,
     error: null,
-    startedAt: Date.now(),
   };
-  state.view = 'hunt';
-  render();
-  window.scrollTo({ top: 0 });
+  renderSettings();
+  renderLive();
   runHunt();
 }
 
@@ -305,7 +300,7 @@ async function runHunt() {
   const match = makeMatcher(h.job);
   h.runStarted = performance.now();
   miner.power = prefs.power;
-  const ticker = setInterval(renderHuntLive, 250);
+  const ticker = setInterval(renderLive, 250);
   try {
     await miner.run(
       h.job,
@@ -340,35 +335,28 @@ async function runHunt() {
   clearInterval(ticker);
   h.activeMs += performance.now() - h.runStarted;
   h.checkedBefore = h.checked;
-  if (h.paused && !h.found && !h.error) return renderHunt();
+  if (h.paused && !h.found && !h.error) {
+    renderSettings();
+    return renderLive();
+  }
   finishHunt();
 }
 
 function finishHunt() {
   const h = state.hunt;
-  state.history.unshift({
-    prefix: h.job.prefix,
-    suffix: h.job.suffix,
-    caseInsensitive: h.job.caseInsensitive,
-    network: h.job.network,
-    at: h.startedAt,
-    seconds: Math.round(h.activeMs / 1000),
-    checked: h.checked,
-    result: h.found ? 'found' : 'stopped',
-    address: h.found || null,
-  });
-  saveHistory();
   if (h.found) {
     alertFound(h.found);
     document.title = '✦ ' + t('foundTitle') + ' — Fancy';
     state.view = 'found';
-  } else {
-    if (h.error) alert(t('stopError', h.error));
-    state.view = 'home';
-    state.hunt = null;
-    document.title = 'Fancy';
+    render();
+    window.scrollTo({ top: 0 });
+    return;
   }
-  render();
+  if (h.error) alert(t('stopError', h.error));
+  state.hunt = null;
+  document.title = 'Fancy';
+  renderSettings();
+  renderLive();
 }
 
 function togglePause() {
@@ -376,10 +364,10 @@ function togglePause() {
   if (!h || h.found) return;
   if (!h.paused) {
     h.paused = true;
-    miner.stop(); // runHunt дождётся остановки и перерисует экран
+    miner.stop(); // runHunt дождётся остановки и обновит экран
   } else {
     h.paused = false;
-    renderHunt();
+    renderSettings();
     runHunt();
   }
 }
@@ -391,7 +379,6 @@ function stopHunt() {
     h.paused = false;
     finishHunt();
   } else {
-    h.paused = false;
     miner.stop();
   }
 }
@@ -416,6 +403,7 @@ function render() {
     if (state.view === 'claim' || state.view === 'found') {
       state.view = 'home';
       state.hunt = null;
+      document.title = 'Fancy';
       render();
     }
   };
@@ -427,7 +415,6 @@ function render() {
       }),
   );
   if (state.view === 'home') renderHome();
-  else if (state.view === 'hunt') renderHunt();
   else if (state.view === 'found') renderFoundView();
   else if (state.view === 'claim') renderClaim();
 }
@@ -435,24 +422,27 @@ function render() {
 // ---------------- главная ----------------
 
 function renderHome() {
+  liveShown = {};
   $('#view').innerHTML = `
     <section class="home">
       <div class="hero">
         <span class="badge"><i></i>${t('badgeLocal')}</span>
         <h1>${t('heroTitle')[0]}<br><span class="grad">${t('heroTitle')[1]}</span></h1>
         <p class="lead">${t('heroLead')}</p>
-        <div class="showcase mono" id="showcase"></div>
         <ul class="points">${t('heroPoints').map((p) => `<li>${p}</li>`).join('')}</ul>
-        <div id="device" class="device"></div>
+        <div class="showcase mono" id="showcase"></div>
+        <div class="live" id="live"></div>
       </div>
       <div class="panel" id="settings"></div>
     </section>
     <section class="block" id="wait"></section>
     <section class="block" id="mine"></section>
-    <section class="block" id="history"></section>
     <section class="block">
       <h2>${t('howTitle')}</h2>
-      <ol class="flow">${t('how').map(([a, b]) => `<li><b>${a}</b><span>${b}</span></li>`).join('')}</ol>
+      <p class="sub">${t('howSub')}</p>
+      <ol class="flow">${t('how')
+        .map(([a, b], i) => `<li><span class="num">${String(i + 1).padStart(2, '0')}</span><div><b>${a}</b><p>${b}</p></div></li>`)
+        .join('')}</ol>
     </section>
     <section class="block">
       <h2>${t('factsTitle')}</h2>
@@ -463,11 +453,10 @@ function renderHome() {
       <div class="faq">${t('faq').map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join('')}</div>
     </section>
   `;
-  renderDevice();
+  renderLive();
   renderSettings();
   renderWaitTable();
   renderMine();
-  renderHistory();
   startShowcase();
 }
 
@@ -480,6 +469,11 @@ function startShowcase() {
   const draw = () => {
     const el = $('#showcase');
     if (!el) return clearInterval(showcaseTimer);
+    // во время поиска витрина показывает настоящий последний кандидат
+    if (state.hunt?.sample) {
+      el.innerHTML = addrHtml(state.hunt.sample, state.hunt.job, 'ghost-hl');
+      return;
+    }
     const job = currentJob();
     const pre = job.prefix || '';
     const suf = job.suffix || '';
@@ -498,32 +492,122 @@ function startShowcase() {
   }, 140);
 }
 
-function renderDevice() {
-  const el = $('#device');
+// ---------------- живая карточка: скорость, ориентир, время с запуска ----------------
+
+let liveShown = {};
+
+/** Плавно «докручивает» число до цели. log: анимировать в логарифмической шкале (для времени). */
+function tweenTo(id, target, format, { log = false, ms = 520 } = {}) {
+  const el = document.getElementById(id);
   if (!el) return;
-  const d = state.device;
-  if (d.status === 'nogpu') {
-    el.className = 'device bad';
-    el.innerHTML = `<span class="dot"></span>${esc(t('gpuUnavailable', d.error))}`;
+  if (!isFinite(target)) {
+    liveShown[id] = target;
+    el.textContent = format(target);
     return;
   }
-  if (d.status !== 'ready') {
-    const txt = d.status === 'checking' ? t('devChecking') : d.status === 'selftest' ? t('devSelftest', esc(d.name)) : t('devBench');
-    el.className = 'device';
-    el.innerHTML = `<span class="pulse"></span>${txt}`;
+  const from = liveShown[id];
+  liveShown[id] = target;
+  // в фоновой вкладке requestAnimationFrame не вызывается — ставим значение сразу
+  if (from === undefined || !isFinite(from) || from === target || document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    el.textContent = format(target);
     return;
   }
-  el.className = 'device';
-  el.innerHTML = `<span class="dot ok"></span><span>${esc(d.name)}</span><span class="sep">·</span><b class="mono">${fmtRate(d.rate)}</b><span class="muted">${t('perSec')}</span>`;
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+  const a = log ? Math.log(Math.max(from, 1e-3)) : from;
+  const b = log ? Math.log(Math.max(target, 1e-3)) : target;
+  const t0 = performance.now();
+  const stepFn = (now) => {
+    if (liveShown[id] !== target) return; // пришло новое значение — эту анимацию бросаем
+    const k = Math.min(1, (now - t0) / ms);
+    const e = 1 - Math.pow(1 - k, 3);
+    const v = a + (b - a) * e;
+    el.textContent = format(log ? Math.exp(v) : v);
+    if (k < 1) requestAnimationFrame(stepFn);
+  };
+  requestAnimationFrame(stepFn);
 }
 
-function seg(name, options, value) {
+function renderLive() {
+  const el = $('#live');
+  if (!el) return;
+  const d = state.device;
+  const h = state.hunt;
+  const st = h ? (h.paused ? 'paused' : 'run') : d.status === 'ready' ? 'idle' : d.status === 'nogpu' ? 'bad' : 'wait';
+  if (el.dataset.st !== st || el.dataset.lang !== lang) {
+    el.dataset.st = st;
+    el.dataset.lang = lang;
+    liveShown = {};
+    const label = {
+      run: t('running'),
+      paused: t('paused'),
+      idle: t('liveReady'),
+      bad: t('liveNoGpu'),
+      wait: d.status === 'checking' ? t('devChecking') : d.status === 'selftest' ? t('devSelftest', esc(d.name)) : t('devBench'),
+    }[st];
+    el.className = `live ${st}`;
+    el.innerHTML = `
+      <div class="live-head">
+        <span class="state"><i></i>${label}</span>
+        ${d.name ? `<span class="gpu">${esc(d.name)}</span>` : ''}
+      </div>
+      ${
+        st === 'bad'
+          ? `<p class="live-err">${esc(t('gpuUnavailable', d.error))}</p>`
+          : `<div class="metrics">
+        <div><span class="k">${t('speed')}</span><b class="mono" id="lv-speed">—</b><small>${t('perSec')}</small></div>
+        <div><span class="k">${t('liveEta')}</span><b id="lv-eta">—</b><small id="lv-eta-sub">${t('median')}</small></div>
+        <div><span class="k">${t('liveElapsed')}</span><b class="mono" id="lv-time">00:00</b><small id="lv-checked">${t('liveNotStarted')}</small></div>
+      </div>
+      <div class="bar"><i id="lv-bar"></i></div>
+      <div class="live-foot"><span id="lv-chance">${t('chance')}: 0%</span><span id="lv-power">${t('gpuLoad')}: ${Math.round(prefs.power * 100)}%</span></div>`
+      }`;
+  }
+  if (st === 'bad') return;
+
+  const job = h ? h.job : currentJob();
+  const v = validateJob(job);
+  const p = h ? h.p : v.ok ? matchProbability(job) : NaN;
+  const rate = h && h.rate ? h.rate : effectiveRate();
+  const median = rate && isFinite(p) ? Math.LN2 / p / rate : NaN;
+
+  tweenTo('lv-speed', rate || NaN, (x) => (isFinite(x) && x > 0 ? fmtCompact(x) : '—'));
+  tweenTo('lv-eta', median, (x) => (isFinite(x) ? fmtDur(x) : '—'), { log: true });
+  const etaEl = $('#lv-eta');
+  if (etaEl) etaEl.className = isFinite(median) ? tier(median) : '';
+  const sub = $('#lv-eta-sub');
+  if (sub) {
+    const p95 = (median / Math.LN2) * Math.log(20);
+    sub.textContent = !isFinite(median) ? t('median') : p95 < 1 ? t('etaInstant') : t('etaSub', fmtDur(p95));
+  }
+
+  const elapsed = h ? (h.activeMs + (h.paused ? 0 : performance.now() - h.runStarted)) / 1000 : 0;
+  const timeEl = $('#lv-time');
+  if (timeEl) timeEl.textContent = fmtClock(elapsed);
+  const checkedEl = $('#lv-checked');
+  if (checkedEl) checkedEl.textContent = h ? `${fmtInt(h.checked)} ${t('checked')}` : t('liveNotStarted');
+  const chance = h ? 1 - Math.exp(-h.checked * h.p) : 0;
+  const bar = $('#lv-bar');
+  if (bar) bar.style.width = `${(chance * 100).toFixed(1)}%`;
+  const ch = $('#lv-chance');
+  if (ch) ch.textContent = `${t('chance')}: ${Math.min(99, Math.floor(chance * 100))}%`;
+  const pw = $('#lv-power');
+  if (pw) pw.textContent = `${t('gpuLoad')}: ${Math.round(prefs.power * 100)}%`;
+  if (h) document.title = `${fmtCompact(h.checked)} · ${patternLabel(h.job)} — Fancy`;
+}
+
+const renderDevice = renderLive;
+
+// ---------------- карточка настроек ----------------
+
+function seg(name, options, value, disabled) {
   return `<div class="seg" data-seg="${name}">${options
-    .map(([v, label]) => `<button data-v="${v}" class="${String(value) === String(v) ? 'on' : ''}">${label}</button>`)
+    .map(([v, label]) => `<button data-v="${v}" class="${String(value) === String(v) ? 'on' : ''}" ${disabled ? 'disabled' : ''}>${label}</button>`)
     .join('')}</div>`;
 }
 
-function field(kind) {
+function field(kind, disabled) {
   const v = kind === 'prefix' ? prefs.prefix : prefs.suffix;
   const head = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
   const affixL = kind === 'prefix' ? head : '…';
@@ -532,47 +616,59 @@ function field(kind) {
     <label class="label">${kind === 'prefix' ? t('atStart') : t('atEnd')}</label>
     <div class="input-row">
       <span class="affix">${affixL}</span>
-      <input data-field="${kind}" maxlength="${MAX_PART}" spellcheck="false" autocomplete="off" value="${esc(v)}" />
+      <input data-field="${kind}" maxlength="${MAX_PART}" spellcheck="false" autocomplete="off" value="${esc(v)}" ${disabled ? 'disabled' : ''} />
       ${affixR ? `<span class="affix">${affixR}</span>` : ''}
       <span class="count">${v.length}/${MAX_PART}</span>
     </div>
     <div class="err" data-err="${kind}"></div>`;
 }
 
+function powerName(p) {
+  return t('powerNames')[p];
+}
+
 function renderSettings() {
   const el = $('#settings');
   if (!el) return;
+  const h = state.hunt;
+  const busy = !!h;
   const showPre = prefs.mode !== 'suffix';
   const showSuf = prefs.mode !== 'prefix';
   const chipKind = showSuf ? 'suffix' : 'prefix';
   const ready = state.device.status === 'ready';
+  const advOpen = el.querySelector('details.adv')?.open ?? false;
   el.innerHTML = `
     <div class="panel-title">${t('settings')}</div>
-    ${seg('mode', [['suffix', t('atEnd')], ['prefix', t('atStart')], ['both', t('both')]], prefs.mode)}
-    ${showPre ? field('prefix') : ''}
-    ${showSuf ? field('suffix') : ''}
-    <div class="chips"><span class="chips-label">${t('popular')}</span>${CHIPS[chipKind]
-      .map((c) => `<button class="chip" data-chip="${c}">${c}</button>`)
-      .join('')}</div>
+    ${seg('mode', [['suffix', t('atEnd')], ['prefix', t('atStart')], ['both', t('both')]], prefs.mode, busy)}
+    ${showPre ? field('prefix', busy) : ''}
+    ${showSuf ? field('suffix', busy) : ''}
+    ${busy ? '' : `<div class="chips"><span class="chips-label">${t('popular')}</span>${CHIPS[chipKind].map((c) => `<button class="chip" data-chip="${c}">${c}</button>`).join('')}</div>`}
     <label class="label">${t('caseLabel')}</label>
-    ${seg('case', [[true, t('caseAny')], [false, t('caseExact')]], prefs.caseInsensitive)}
-    <p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${t('allowed')}</p>
+    ${seg('case', [[true, t('caseAny')], [false, t('caseExact')]], prefs.caseInsensitive, busy)}
+    ${busy ? '' : `<p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${t('allowed')}</p>`}
     <div id="estimate"></div>
-    <details class="adv">
-      <summary>${t('advanced')}</summary>
-      <label class="label">${t('gpuLoad')}</label>
-      <div class="power" data-power>${POWER_LEVELS.map(
-        (p) =>
-          `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}"><b>${Math.round(p * 100)}%</b><span>${powerName(p)}</span></button>`,
-      ).join('')}</div>
-      <p class="note">${t('powerNote')}</p>
-      <label class="label">${t('network')}</label>
-      ${seg('net', [['mainnet', 'Mainnet'], ['testnet', 'Testnet']], prefs.network)}
-      <label class="label">${t('apiKey')}</label>
-      <input id="apikey" class="plain" placeholder="${esc(t('apiKeyPh'))}" value="${esc(prefs.apiKey)}" />
-    </details>
-    <button id="go" class="cta" ${ready ? '' : 'disabled'}>${ready ? t('start') : state.device.status === 'nogpu' ? '—' : t('waitBench')}</button>
-    <div class="lock">🔒 ${t('localNote')}</div>
+    <label class="label">${t('gpuLoad')}</label>
+    <div class="power" data-power>${POWER_LEVELS.map(
+      (p) => `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}"><b>${Math.round(p * 100)}%</b><span>${powerName(p)}</span></button>`,
+    ).join('')}</div>
+    ${
+      busy
+        ? `<div class="hunt-controls">
+            <button class="btn ghost" id="pause">${h.paused ? '▶ ' + t('resume') : '❚❚ ' + t('pause')}</button>
+            <button class="btn ghost danger" id="stop">■ ${t('stop')}</button>
+          </div>
+          <p class="note center">${t('randomNote')} ${t('notifyHint')}</p>`
+        : `<details class="adv" ${advOpen ? 'open' : ''}>
+            <summary>${t('advanced')}</summary>
+            <p class="note">${t('powerNote')}</p>
+            <label class="label">${t('network')}</label>
+            ${seg('net', [['mainnet', 'Mainnet'], ['testnet', 'Testnet']], prefs.network)}
+            <label class="label">${t('apiKey')}</label>
+            <input id="apikey" class="plain" placeholder="${esc(t('apiKeyPh'))}" value="${esc(prefs.apiKey)}" />
+          </details>
+          <button id="go" class="cta" ${ready ? '' : 'disabled'}>${ready ? t('start') : state.device.status === 'nogpu' ? '—' : t('waitBench')}</button>
+          <div class="lock">🔒 ${t('localNote')}</div>`
+    }
   `;
 
   el.querySelectorAll('[data-field]').forEach((inp) => {
@@ -588,6 +684,7 @@ function renderSettings() {
   });
   el.querySelectorAll('[data-seg] button').forEach((b) => {
     b.onclick = () => {
+      if (state.hunt) return;
       const k = b.parentElement.dataset.seg;
       if (k === 'mode') prefs.mode = b.dataset.v;
       if (k === 'case') prefs.caseInsensitive = b.dataset.v === 'true';
@@ -610,27 +707,26 @@ function renderSettings() {
     b.onclick = () => {
       prefs.power = Number(b.dataset.p);
       savePrefs();
-      renderSettings();
+      if (state.hunt && miner) miner.power = prefs.power;
+      el.querySelectorAll('[data-p]').forEach((x) => x.classList.toggle('on', x === b));
+      updateLive();
       renderWaitTable();
     };
   });
-  if (el.querySelector('details.adv') && prefs._advOpen) el.querySelector('details.adv').open = true;
-  el.querySelector('details.adv').ontoggle = (e) => (prefs._advOpen = e.target.open);
-  $('#apikey').onchange = (e) => {
-    prefs.apiKey = e.target.value.trim();
-    savePrefs();
-  };
-  $('#go').onclick = startHunt;
+  $('#apikey') &&
+    ($('#apikey').onchange = (e) => {
+      prefs.apiKey = e.target.value.trim();
+      savePrefs();
+    });
+  $('#go') && ($('#go').onclick = startHunt);
+  $('#pause') && ($('#pause').onclick = togglePause);
+  $('#stop') && ($('#stop').onclick = stopHunt);
   updateLive();
 }
 
-function powerName(p) {
-  return t('powerNames')[p];
-}
-
-/** Ошибки полей, оценка времени и витрина — без перерисовки всей карточки (не сбивает фокус). */
+/** Ошибки полей, оценка в карточке и живая карточка — без перерисовки полей (не сбивает фокус). */
 function updateLive() {
-  const job = currentJob();
+  const job = state.hunt ? state.hunt.job : currentJob();
   const v = validateJob(job);
   for (const kind of ['prefix', 'suffix']) {
     const e = document.querySelector(`[data-err="${kind}"]`);
@@ -644,19 +740,15 @@ function updateLive() {
       el.innerHTML = v.empty ? `<div class="err">${t('err.empty')}</div>` : '';
     } else {
       const p = matchProbability(job);
-      const rate = effectiveRate();
-      const median = rate ? Math.LN2 / p / rate : NaN;
-      const p95 = rate ? Math.log(20) / p / rate : NaN;
-      const tr = rate ? tier(median) : '';
+      const median = effectiveRate() ? Math.LN2 / p / effectiveRate() : NaN;
+      const tr = isFinite(median) ? tier(median) : '';
       el.innerHTML = `
-        <div class="est ${tr}">
-          <div><span class="k">${t('attempts')}</span><span class="v mono">${fmtCompact(1 / p)}</span></div>
-          <div><span class="k">${t('median')}</span><span class="v">${rate ? fmtDur(median) : t('measuring')}</span></div>
-          <div><span class="k">${t('oneIn20')}</span><span class="v">${rate ? fmtDur(p95) : '—'}</span></div>
-        </div>
+        <div class="attempts"><span>${t('attempts')}</span><b class="mono">${fmtCompact(1 / p)}</b><span class="tier ${tr}">${tr ? t('feasibility.' + tr) : ''}</span></div>
         ${tr === 'long' ? `<div class="warn">${t('longNote')}</div>` : tr === 'insane' ? `<div class="warn bad">${t('tooLong')}</div>` : ''}`;
     }
   }
+  startShowcase();
+  renderLive();
 }
 
 function renderWaitTable() {
@@ -671,9 +763,7 @@ function renderWaitTable() {
   for (let n = 3; n <= MAX_PART; n++) {
     const any = Math.LN2 / Math.pow(2 / 64, n) / rate;
     const exact = Math.LN2 / Math.pow(1 / 64, n) / rate;
-    rows.push(
-      `<tr><td class="mono">${n}</td><td class="${tier(any)}">${fmtDur(any)}</td><td class="${tier(exact)}">${fmtDur(exact)}</td></tr>`,
-    );
+    rows.push(`<tr><td class="mono">${n}</td><td class="${tier(any)}">${fmtDur(any)}</td><td class="${tier(exact)}">${fmtDur(exact)}</td></tr>`);
   }
   el.innerHTML = `
     <h2>${t('waitTitle')}</h2>
@@ -723,104 +813,6 @@ function renderMine() {
         renderMine();
       }),
   );
-}
-
-function renderHistory() {
-  const el = $('#history');
-  if (!el) return;
-  const h = state.history;
-  el.innerHTML = `
-    <div class="row-between"><h2>${t('histTitle')}</h2>${h.length ? `<button class="btn ghost small" id="hclear">${t('histClear')}</button>` : ''}</div>
-    ${
-      h.length
-        ? `<div class="table-wrap"><table class="hist">
-        <tbody>${h
-          .map(
-            (x) => `<tr>
-          <td class="mono strong">${esc(patternLabel(x))}</td>
-          <td class="muted">${x.caseInsensitive ? t('caseAny') : t('caseExact')}</td>
-          <td class="mono">${fmtCompact(x.checked)}</td>
-          <td class="mono">${fmtClock(x.seconds)}</td>
-          <td><span class="pill ${x.result === 'found' ? 'switched' : ''}">${x.result === 'found' ? t('histFound') : t('histStopped')}</span></td>
-          <td class="muted small">${new Date(x.at).toLocaleString(locale())}</td>
-        </tr>`,
-          )
-          .join('')}</tbody></table></div>`
-        : `<div class="empty">${t('histEmpty')}</div>`
-    }`;
-  $('#hclear') &&
-    ($('#hclear').onclick = () => {
-      state.history = [];
-      saveHistory();
-      renderHistory();
-    });
-}
-
-// ---------------- экран поиска ----------------
-
-function renderHunt() {
-  clearInterval(showcaseTimer);
-  const h = state.hunt;
-  $('#view').innerHTML = `
-    <section class="hunt">
-      <button class="back" id="back">← ${t('back')}</button>
-      <span class="badge"><i></i>${t('badgeLocal')}</span>
-      <h1 class="hunt-title">${t('huntTitle', `<span class="grad mono">${esc(patternLabel(h.job))}</span>`)}</h1>
-      <p class="lead center">${t('huntSub', esc(state.device.name))}</p>
-      <div class="hunt-card">
-        <div class="state ${h.paused ? 'paused' : ''}"><i></i>${h.paused ? t('paused') : t('running')}</div>
-        <div class="big mono" id="h-checked">0</div>
-        <div class="muted">${t('checked')}</div>
-        <div class="bar"><i id="h-bar"></i></div>
-        <div class="stats">
-          <div><span>${t('speed')}</span><b class="mono" id="h-speed">—</b></div>
-          <div><span>${t('time')}</span><b class="mono" id="h-time">00:00</b></div>
-          <div><span>${t('eta')}</span><b id="h-eta">—</b></div>
-          <div><span>${t('chance')}</span><b class="mono" id="h-chance">0%</b></div>
-        </div>
-        <div class="candidate">
-          <span class="k">${t('lastCandidate')}</span>
-          <div class="mono" id="h-sample">—</div>
-        </div>
-      </div>
-      <div class="controls">
-        <button class="btn ghost" id="pause">${h.paused ? '▶ ' + t('resume') : '❚❚ ' + t('pause')}</button>
-        <div class="power small-power">${POWER_LEVELS.map(
-          (p) => `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}">${Math.round(p * 100)}%</button>`,
-        ).join('')}</div>
-        <button class="btn ghost danger" id="stop">■ ${t('stop')}</button>
-      </div>
-      <p class="note center">ⓘ ${t('randomNote')}<br>${t('notifyHint')}</p>
-    </section>`;
-  $('#back').onclick = stopHunt;
-  $('#stop').onclick = stopHunt;
-  $('#pause').onclick = togglePause;
-  document.querySelectorAll('.small-power [data-p]').forEach(
-    (b) =>
-      (b.onclick = () => {
-        prefs.power = Number(b.dataset.p);
-        savePrefs();
-        if (miner) miner.power = prefs.power;
-        document.querySelectorAll('.small-power [data-p]').forEach((x) => x.classList.toggle('on', x === b));
-      }),
-  );
-  renderHuntLive();
-}
-
-function renderHuntLive() {
-  const h = state.hunt;
-  if (!h || state.view !== 'hunt') return;
-  const elapsed = (h.activeMs + (h.paused ? 0 : performance.now() - h.runStarted)) / 1000;
-  const chance = 1 - Math.exp(-h.checked * h.p);
-  const rate = h.rate || effectiveRate();
-  $('#h-checked').textContent = fmtInt(h.checked);
-  $('#h-speed').textContent = `${fmtRate(h.rate)}${lang === 'ru' ? '/с' : '/s'}`;
-  $('#h-time').textContent = fmtClock(elapsed);
-  $('#h-eta').textContent = rate ? fmtDur(Math.LN2 / h.p / rate) : '—';
-  $('#h-chance').textContent = `${Math.min(99, Math.floor(chance * 100))}%`;
-  $('#h-bar').style.width = `${(chance * 100).toFixed(1)}%`;
-  if (h.sample) $('#h-sample').innerHTML = addrHtml(h.sample, h.job, 'ghost-hl');
-  document.title = `${fmtCompact(h.checked)} · ${patternLabel(h.job)} — Fancy`;
 }
 
 // ---------------- находка ----------------
