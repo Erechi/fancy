@@ -7,7 +7,7 @@ It runs on your GPU right in the browser — no server, no sign-up, open source.
 
 ### [⬇ Download Fancy.html](../../releases/latest)
 
-[Русский](README.md) · [How to use](#how-to-use) · [Security](#security--privacy) · [How it works](#how-it-works)
+[Русский](README.md) · [Telegram channel](https://t.me/blackwrites) · [How to use](#how-to-use) · [Security](#security--privacy) · [How it works](#how-it-works)
 
 <img src="docs/home.png" alt="Fancy main screen" width="860">
 
@@ -149,6 +149,10 @@ Fancy is not affiliated with Telegram. Telegram Wallet is a product of its respe
 ## Credits
 
 [ton-blockchain/tg-wallet-contract](https://github.com/ton-blockchain/tg-wallet-contract) · [@noble/hashes](https://github.com/paulmillr/noble-hashes) · [@noble/curves](https://github.com/paulmillr/noble-curves) · [@scure/bip39](https://github.com/paulmillr/scure-bip39) · [@ton/core](https://github.com/ton-org/ton-core) · [@ton/sandbox](https://github.com/ton-org/sandbox) · [Vite](https://vitejs.dev)
+
+## Author
+
+**@wtf_black** · Telegram channel: [@blackwrites](https://t.me/blackwrites) — Fancy news and other projects.
 
 ## License
 

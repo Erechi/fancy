@@ -18,6 +18,8 @@ import { t, lang, setLang, locale } from './ui/i18n.js';
 /** Ссылка на репозиторий и версия — из package.json (см. vite.config.js). */
 const REPO_URL = __REPO_URL__;
 const APP_VERSION = __APP_VERSION__;
+/** Telegram-канал автора. */
+const CHANNEL_URL = 'https://t.me/blackwrites';
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const POWER_LEVELS = [0.25, 0.5, 0.75, 1];
 const RECOMMENDED_POWER = 0.75;
@@ -400,7 +402,7 @@ function render() {
       </div>
     </header>
     <main id="view"></main>
-    <footer class="foot"><span>Fancy v${APP_VERSION}${REPO_URL ? ` · <a href="${esc(REPO_URL)}" target="_blank" rel="noopener">GitHub</a>` : ''}</span><span>${t('footer')}</span></footer>
+    <footer class="foot"><span>Fancy v${APP_VERSION}${REPO_URL ? ` · <a href="${esc(REPO_URL)}" target="_blank" rel="noopener">GitHub</a>` : ''} · ${t('channel')} <a href="${CHANNEL_URL}" target="_blank" rel="noopener">@blackwrites</a></span><span>${t('footer')}</span></footer>
   `;
   $('[data-home]').onclick = (e) => {
     e.preventDefault();

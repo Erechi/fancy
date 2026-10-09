@@ -3,6 +3,7 @@
 const ru = {
   langName: 'RU',
   source: 'Исходный код',
+  channel: 'Канал автора',
   badgeLocal: '100% локально',
   heroTitle: ['Адрес, который', 'хочется показать'],
   heroLead:
@@ -187,6 +188,7 @@ const ru = {
 const en = {
   langName: 'EN',
   source: 'Source code',
+  channel: 'Author’s channel',
   badgeLocal: '100% local',
   heroTitle: ['An address', 'worth showing off'],
   heroLead:

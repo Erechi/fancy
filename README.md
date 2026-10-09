@@ -7,7 +7,7 @@
 
 ### [⬇ Скачать Fancy.html](../../releases/latest)
 
-[English](README.en.md) · [Как пользоваться](#как-пользоваться) · [Безопасность](#безопасность-и-приватность) · [Как это устроено](#как-это-устроено)
+[English](README.en.md) · [Telegram-канал](https://t.me/blackwrites) · [Как пользоваться](#как-пользоваться) · [Безопасность](#безопасность-и-приватность) · [Как это устроено](#как-это-устроено)
 
 <img src="docs/home.png" alt="Fancy — главный экран" width="860">
 
@@ -149,6 +149,10 @@ Fancy не аффилирован с Telegram. Telegram Wallet — продук�
 ## Благодарности
 
 [ton-blockchain/tg-wallet-contract](https://github.com/ton-blockchain/tg-wallet-contract) · [@noble/hashes](https://github.com/paulmillr/noble-hashes) · [@noble/curves](https://github.com/paulmillr/noble-curves) · [@scure/bip39](https://github.com/paulmillr/scure-bip39) · [@ton/core](https://github.com/ton-org/ton-core) · [@ton/sandbox](https://github.com/ton-org/sandbox) · [Vite](https://vitejs.dev)
+
+## Автор
+
+**@wtf_black** · Telegram-канал: [@blackwrites](https://t.me/blackwrites) — новости Fancy и другие проекты.
 
 ## Лицензия
 
