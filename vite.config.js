@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
 // Content-Security-Policy только для production-сборки (dev-серверу Vite нужны websocket и eval).
-// Страница может ходить в сеть лишь к toncenter — фразам физически некуда утечь.
+// Fetch/XHR разрешены только к toncenter; это страховка на случай будущей XSS, а не полная защита от утечки.
 const CSP = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-inline' blob:",
