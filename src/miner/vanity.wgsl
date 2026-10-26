@@ -47,17 +47,19 @@ fn add64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
   let lo = a.y + b.y;
   return vec2<u32>(a.x + b.x + select(0u, 1u, lo < a.y), lo);
 }
+// Половинки сдвигов не пересекаются по битам, поэтому склеиваем их через ^, а не |:
+// так компилятор сливает их с XOR-ами сигма-функций (замер: +2,6%).
 // 0 < n < 32
 fn rotr(a: vec2<u32>, n: u32) -> vec2<u32> {
-  return vec2<u32>((a.x >> n) | (a.y << (32u - n)), (a.y >> n) | (a.x << (32u - n)));
+  return vec2<u32>((a.x >> n) ^ (a.y << (32u - n)), (a.y >> n) ^ (a.x << (32u - n)));
 }
 // 32 < n < 64
 fn rotrh(a: vec2<u32>, n: u32) -> vec2<u32> {
   let m = n - 32u;
-  return vec2<u32>((a.y >> m) | (a.x << (32u - m)), (a.x >> m) | (a.y << (32u - m)));
+  return vec2<u32>((a.y >> m) ^ (a.x << (32u - m)), (a.x >> m) ^ (a.y << (32u - m)));
 }
 fn shr(a: vec2<u32>, n: u32) -> vec2<u32> {
-  return vec2<u32>(a.x >> n, (a.y >> n) | (a.x << (32u - n)));
+  return vec2<u32>(a.x >> n, (a.y >> n) ^ (a.x << (32u - n)));
 }
 
 fn k512(i: u32) -> vec2<u32> {
@@ -186,38 +188,11 @@ fn fe_carry(o: ptr<function, Fe>) {
   (*o)[0] += 38u * c;
 }
 
-fn fe_mul(a: Fe, b: Fe) -> Fe {
-  var r: array<u32, 32>;
-  var clo = 0u;
-  var chi = 0u;
-  for (var k = 0u; k < 31u; k++) {
-    var lo = clo;
-    var hi = chi;
-    let i0 = select(0u, k - 15u, k > 15u);
-    let i1 = min(k, 15u);
-    for (var i = i0; i <= i1; i++) {
-      let p = a[i] * b[k - i];
-      lo += p;
-      hi += select(0u, 1u, lo < p);
-    }
-    r[k] = lo & 0xffffu;
-    clo = (lo >> 16u) | (hi << 16u);
-    chi = hi >> 16u;
-  }
-  r[31] = clo;
-  var o: Fe;
-  for (var i = 0u; i < 16u; i++) {
-    o[i] = r[i] + 38u * r[i + 16u];
-  }
-  fe_carry(&o);
-  return o;
-}
-
-fn fe_sq(a: Fe) -> Fe { return fe_mul(a, a); }
+// fe_mul и fe_sq — развёрнутые, генерируются в fe-unrolled.js и дописываются к шейдеру
 
 fn fe_sqn(a: Fe, n: u32) -> Fe {
   var t = a;
-  for (var i = 0u; i < n; i++) { t = fe_mul(t, t); }
+  for (var i = 0u; i < n; i++) { t = fe_sq(t); }
   return t;
 }
 
@@ -310,11 +285,8 @@ fn word_bits(w: ptr<function, array<u32, 5>>, off: u32) -> u32 {
   return v >> 21u;
 }
 
-@compute @workgroup_size(WG)
-fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-  let gid = gid3.x + gid3.y * nwg.x * WG;
-  if (gid >= P.count) { return; }
-
+// Часть 1: энтропия → фраза → seed (PBKDF2). Здесь уходит почти всё время.
+fn seed_of(gid: u32) -> array<vec2<u32>, 8> {
   // --- энтропия и чек-сумма BIP39 ---
   let e0 = P.base.x;
   let e1 = P.base.y;
@@ -369,12 +341,26 @@ fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups)
     u = hmac64(&ist, &ost, &u);
     for (var i = 0u; i < 8u; i++) { t[i] = t[i] ^ u[i]; }
   }
+  return t;
+}
+
+// Часть 2: seed → SLIP-10 → ed25519 → адрес → сравнение с шаблоном.
+fn finish(gid: u32, t: array<vec2<u32>, 8>) {
+  let e0 = P.base.x;
+  let e1 = P.base.y;
+  let e2 = P.base.z;
+  let e3 = P.base.w ^ gid;
+  var w: array<vec2<u32>, 16>;
+  var w32: array<u32, 16>;
+  var ist: array<vec2<u32>, 8>;
+  var ost: array<vec2<u32>, 8>;
+  var tt = t;
 
   // --- SLIP-10: мастер-ключ HMAC("ed25519 seed", seed) ---
   var mk: array<u32, 32>;
   mk[0] = 0x65643235u; mk[1] = 0x35313920u; mk[2] = 0x73656564u; // "ed25519 seed"
   hmac_init(&mk, &ist, &ost);
-  var I = hmac64(&ist, &ost, &t);
+  var I = hmac64(&ist, &ost, &tt);
 
   // --- три усиленных шага: 44', 607', 0' ---
   for (var lvl = 0u; lvl < 3u; lvl++) {
@@ -512,7 +498,7 @@ fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups)
 
   if (P.mode == 1u) {
     let base = gid * 40u;
-    for (var i = 0u; i < 8u; i++) { DBG[base + 2u * i] = t[i].x; DBG[base + 2u * i + 1u] = t[i].y; }
+    for (var i = 0u; i < 8u; i++) { DBG[base + 2u * i] = tt[i].x; DBG[base + 2u * i + 1u] = tt[i].y; }
     for (var i = 0u; i < 4u; i++) { DBG[base + 16u + 2u * i] = I[i].x; DBG[base + 17u + 2u * i] = I[i].y; }
     for (var i = 0u; i < 8u; i++) {
       DBG[base + 24u + i] = pk[4u * i] | (pk[4u * i + 1u] << 8u) | (pk[4u * i + 2u] << 16u) | (pk[4u * i + 3u] << 24u);
@@ -535,4 +521,11 @@ fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups)
     OUT.results[slot * 4u + 2u] = e2;
     OUT.results[slot * 4u + 3u] = e3;
   }
+}
+
+@compute @workgroup_size(WG)
+fn main(@builtin(global_invocation_id) gid3: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let gid = gid3.x + gid3.y * nwg.x * WG;
+  if (gid >= P.count) { return; }
+  finish(gid, seed_of(gid));
 }

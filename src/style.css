@@ -68,6 +68,9 @@ button { font: inherit; color: inherit; }
 .addr .dim { color: var(--dim); }
 .addr b { font-weight: 700; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 12px rgba(185, 169, 255, 0.35)); }
 .addr.ghost-hl b { background: none; color: var(--accent); filter: none; opacity: 0.85; }
+/* позиция под курсором в режиме «любые позиции»: рамка не сдвигает текст */
+.addr .mark { border-radius: 4px; outline: 1.5px solid var(--accent); outline-offset: 1px; background: rgba(155, 140, 255, 0.2); box-shadow: 0 0 14px rgba(185, 169, 255, 0.45); }
+.addr .mark .dim { color: var(--text); }
 
 .points { list-style: none; padding: 0; margin: 20px 0; display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 14px; }
 .points li::before { content: '✓'; color: var(--ok); margin-right: 7px; font-weight: 700; }
@@ -296,3 +299,57 @@ table.wait td:not(:first-child) { font-weight: 650; }
 .price > div.hl b { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .price-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
 @media (max-width: 420px) { .price { grid-template-columns: 1fr 1fr; } .price > div:first-child { grid-column: span 2; } }
+
+/* ---------- режим «любые позиции»: адрес клетками ---------- */
+.seg.grid2 { display: grid; grid-template-columns: 1fr 1fr; }
+.cells { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 10px; padding: 12px; border-radius: 16px; background: var(--bg); border: 1px solid var(--line-2); transition: border-color 0.15s, box-shadow 0.15s; }
+.cells:focus-within { border-color: rgba(185, 169, 255, 0.6); box-shadow: 0 0 0 4px rgba(155, 140, 255, 0.12); }
+.cgroup { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
+.cell { width: 100%; min-width: 0; height: 30px; padding: 0; border: 0; border-radius: 6px; background: var(--surface-2); color: var(--text); font: 700 15px var(--mono); cursor: pointer; transition: background 0.12s, box-shadow 0.12s; }
+.cell:empty::before { content: '·'; color: var(--dim); font-weight: 400; }
+.cell.fixed { background: none; color: var(--dim); cursor: default; }
+.cell.set { background: rgba(155, 140, 255, 0.18); color: var(--accent); }
+.cell.cur { box-shadow: inset 0 0 0 2px var(--accent); }
+.cell.bad { background: rgba(255, 90, 110, 0.18); color: var(--bad); }
+.cells.off .cell { cursor: default; }
+.cell-input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
+.cells-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.cells-bar .count.over { color: var(--bad); }
+.linkbtn { border: 0; background: none; color: var(--muted); font-size: 12.5px; cursor: pointer; padding: 2px 0; }
+.linkbtn:hover { color: var(--text); }
+@media (max-width: 400px) {
+  .cells { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 10px; }
+}
+
+/* ---------- карточка кошелька: адрес вертикально справа, как в Telegram Wallet ---------- */
+.wcard-wrap { margin-top: 4px; margin-bottom: 14px; perspective: 1000px; animation: wfloat 7s ease-in-out infinite; }
+@keyframes wfloat { 50% { translate: 0 -5px; } }
+.wcard { position: relative; container-type: inline-size; aspect-ratio: 1.75 / 1; border-radius: 28px; overflow: hidden; color: #fff; touch-action: pan-y;
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) scale(var(--s, 1)); will-change: transform;
+  background:
+    radial-gradient(120% 90% at calc(78% - var(--tx, 0) * 18%) calc(30% - var(--ty, 0) * 18%), rgba(185, 169, 255, 0.28), transparent 55%),
+    radial-gradient(90% 80% at 0% 100%, rgba(255, 122, 198, 0.18), transparent 60%),
+    repeating-radial-gradient(circle at 70% 40%, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 3px),
+    linear-gradient(125deg, #2e2668 0%, #43349a 50%, #5e3478 100%);
+  box-shadow: calc(var(--tx, 0) * -16px) calc(30px + var(--ty, 0) * -12px) 70px -30px rgba(155, 140, 255, 0.5), inset 0 0 0 1px rgba(185, 169, 255, 0.22); }
+/* блик под указателем */
+.wcard-glare { position: absolute; inset: 0; z-index: 2; pointer-events: none; opacity: var(--glow, 0); mix-blend-mode: overlay;
+  background: radial-gradient(circle at var(--gx, 50%) var(--gy, 25%), rgba(220, 210, 255, 0.35), rgba(220, 210, 255, 0.08) 30%, transparent 60%); }
+/* лёгкий параллакс: надписи и адрес смещаются в разные стороны */
+.wcard-bal, .wcard-usd, .wcard-name, .wcard-qr { translate: calc(var(--tx, 0) * 5px) calc(var(--ty, 0) * 5px); }
+.wcard-addr { translate: calc(var(--tx, 0) * -3px) calc(var(--ty, 0) * -3px); }
+@media (prefers-reduced-motion: reduce) { .wcard-wrap { animation: none; } }
+.wcard::before { content: '✦  ✦'; position: absolute; left: 52%; top: 18%; font-size: 3cqw; letter-spacing: 9cqw; color: rgba(185, 169, 255, 0.3); }
+.wcard::after { content: '✦'; position: absolute; left: 14%; bottom: 30%; font-size: 2.4cqw; color: rgba(255, 122, 198, 0.3); }
+.wcard-bal { position: absolute; left: 6%; top: 34%; display: flex; align-items: baseline; font-size: 7.5cqw; font-weight: 600; letter-spacing: -0.01em; }
+.wcard-bal small { font-size: 0.6em; }
+.wcard-gem { margin-right: 0.25em; font-size: 0.8em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 0.3em rgba(185, 169, 255, 0.5)); }
+.wcard-cur { margin-left: 0.25em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.wcard-usd { position: absolute; left: 6%; top: 54%; font-size: 3.6cqw; font-weight: 500; color: rgba(225, 218, 255, 0.6); }
+.wcard-name { position: absolute; left: 6%; bottom: 10%; font-size: 3.2cqw; font-weight: 700; letter-spacing: 0.04em; }
+.wcard-qr { position: absolute; left: 68%; top: 38%; display: grid; place-items: center; width: 11.5cqw; height: 8.5cqw; border-radius: 1.8cqw; background: rgba(255, 255, 255, 0.07); box-shadow: inset 0 0 0 1px rgba(185, 169, 255, 0.28), 0 0.6cqw 1.6cqw rgba(0, 0, 0, 0.3); }
+.wcard-qr svg { width: 45%; height: 45%; fill: none; stroke: var(--accent); stroke-width: 2; }
+.wcard-addr { position: absolute; right: 5%; top: 50%; transform: translateY(-50%); writing-mode: vertical-rl; display: flex; flex-direction: column; gap: 0.55em; font-size: clamp(8px, 2.45cqw, 16px); line-height: 1; letter-spacing: 0.06em; white-space: pre; color: rgba(230, 224, 255, 0.42); }
+.wcard-addr i { font-style: normal; }
+.wcard-addr i.on { color: #e6deff; font-weight: 700; text-shadow: 0 0 0.6em rgba(185, 169, 255, 0.8); }
+.wcard-addr i.mark { border-radius: 3px; outline: 1.5px solid var(--accent); outline-offset: 1px; background: rgba(155, 140, 255, 0.25); color: #fff; }

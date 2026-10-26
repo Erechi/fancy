@@ -33,6 +33,10 @@ export function sha512M64Wgsl() {
   L.push('  var w15 = vec2<u32>(0u, 1536u);');
   for (let i = 0; i < 8; i++) L.push(`  var s${i} = st[${i}];`);
   const s = (k, i) => `s${(((k - i) % 8) + 8) % 8}`;
+  // слова 8..15 известны заранее: для раундов 8..15 складываем K + W ещё при генерации
+  const constW = { 8: '8000000000000000', 9: '0', 10: '0', 11: '0', 12: '0', 13: '0', 14: '0', 15: '600' };
+  const addHex = (x, y) => ((BigInt('0x' + x) + BigInt('0x' + y)) & ((1n << 64n) - 1n)).toString(16).padStart(16, '0');
+  L.push('  var ab = s1 ^ s2; // b^c первого раунда, см. Maj ниже');
   for (let i = 0; i < 80; i++) {
     const a = s(0, i), b = s(1, i), c = s(2, i), d = s(3, i);
     const e = s(4, i), f = s(5, i), g = s(6, i), h = s(7, i);
@@ -45,9 +49,14 @@ export function sha512M64Wgsl() {
         `  ${wi} = add64(add64(${wi}, rotr(${w15}, 1u) ^ rotr(${w15}, 8u) ^ shr(${w15}, 7u)), add64(${w7}, rotr(${w2}, 19u) ^ rotrh(${w2}, 61u) ^ shr(${w2}, 6u)));`,
       );
     }
+    const kw = i < 16 && constW[i] !== undefined ? v2(addHex(K512[i], constW[i])) : null;
+    const t1rest = kw ? `add64(${g} ^ (${e} & (${f} ^ ${g})), ${kw})` : `add64(add64(${g} ^ (${e} & (${f} ^ ${g})), ${v2(K512[i])}), ${wi})`;
+    // Maj(a,b,c) = b ^ ((a^b) & (b^c)); (a^b) этого раунда — это (b^c) следующего, считаем его один раз
+    const maj = `${b} ^ (bc & ab)`;
     L.push(
-      `  { let t1 = add64(add64(${h}, rotr(${e}, 14u) ^ rotr(${e}, 18u) ^ rotrh(${e}, 41u)), add64(add64(${g} ^ (${e} & (${f} ^ ${g})), ${v2(K512[i])}), ${wi}));` +
-        ` let t2 = add64(rotr(${a}, 28u) ^ rotrh(${a}, 34u) ^ rotrh(${a}, 39u), (${a} & ${b}) | (${c} & (${a} | ${b})));` +
+      `  { let t1 = add64(add64(${h}, rotr(${e}, 14u) ^ rotr(${e}, 18u) ^ rotrh(${e}, 41u)), ${t1rest});` +
+        ` let bc = ab; ab = ${a} ^ ${b};` +
+        ` let t2 = add64(rotr(${a}, 28u) ^ rotrh(${a}, 34u) ^ rotrh(${a}, 39u), ${maj});` +
         ` ${d} = add64(${d}, t1); ${h} = add64(t1, t2); }`,
     );
   }

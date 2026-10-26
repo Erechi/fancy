@@ -5,9 +5,12 @@ import {
   WORDLIST,
   NETWORKS,
   MAX_PART,
+  ADDR_LEN,
+  MAX_FIXED,
   bytesToHex,
   makeMatcher,
   matchProbability,
+  patternPositions,
   validateJob,
   wordsToWallet,
 } from './core/fast.js';
@@ -22,7 +25,9 @@ const APP_VERSION = __APP_VERSION__;
 const CHANNEL_URL = 'https://t.me/blackwrites';
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const POWER_LEVELS = [0.25, 0.5, 0.75, 1];
-const RECOMMENDED_POWER = 0.75;
+/** Телефон или планшет: палец вместо мыши. На них слабее охлаждение — по умолчанию меньше нагрузка. */
+const IS_PHONE = window.matchMedia('(pointer: coarse)').matches;
+const RECOMMENDED_POWER = IS_PHONE ? 0.5 : 0.75;
 /** Сколько просим отправить на активацию. Реальная комиссия деплоя и смены ключа ≈ 0.0007 GRAM. */
 const ACTIVATION_GRAM = '0.1';
 const ACTIVATION_NANO = 100_000_000;
@@ -71,6 +76,8 @@ const prefs = Object.assign(
   { mode: 'suffix', prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true, network: 'mainnet', apiKey: '', power: RECOMMENDED_POWER },
   store.get(K_PREFS, {}),
 );
+// режим «любые позиции»: символ или '' для каждой из 48 позиций адреса
+if (!Array.isArray(prefs.cells) || prefs.cells.length !== ADDR_LEN) prefs.cells = Array(ADDR_LEN).fill('');
 
 const state = {
   view: 'home', // home | found | claim
@@ -93,6 +100,9 @@ const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 function currentJob() {
+  if (prefs.mode === 'cells') {
+    return { cells: [...prefs.cells], caseInsensitive: prefs.caseInsensitive, network: prefs.network };
+  }
   return {
     prefix: prefs.mode === 'suffix' ? '' : prefs.prefix,
     suffix: prefs.mode === 'prefix' ? '' : prefs.suffix,
@@ -102,6 +112,11 @@ function currentJob() {
 }
 
 function patternLabel(job) {
+  if (job.cells) {
+    // UQ·GR·…·AM: свободные позиции — «·», длинные пустые участки — «…»
+    const head = NETWORKS[job.network]?.testOnly ? '0Q' : 'UQ';
+    return (head + job.cells.slice(2).map((c) => c || '·').join('')).replace(/·{3,}/g, '…');
+  }
   return `${job.prefix ? 'UQ' + job.prefix : ''}…${job.suffix || ''}`;
 }
 
@@ -167,14 +182,36 @@ async function copy(text, btn) {
 }
 
 /** Адрес с подсвеченными символами шаблона. */
-function addrHtml(address, job, cls = '') {
-  const pre = job.prefix ? job.prefix.length : 0;
-  const suf = job.suffix ? job.suffix.length : 0;
-  const head = address.slice(0, 2);
-  const p = address.slice(2, 2 + pre);
-  const mid = address.slice(2 + pre, 48 - suf);
-  const s = address.slice(48 - suf);
-  return `<span class="addr ${cls}"><span class="dim">${esc(head)}</span>${p ? `<b>${esc(p)}</b>` : ''}<span class="dim">${esc(mid)}</span>${s ? `<b>${esc(s)}</b>` : ''}</span>`;
+/** mark — позиция, отмеченная рамкой (клетка под курсором в режиме «любые позиции»). */
+function addrHtml(address, job, cls = '', mark = -1) {
+  const hl = new Set(patternPositions(job).map((x) => x.index));
+  let html = '';
+  for (let i = 0; i < address.length; ) {
+    const on = hl.has(i);
+    let j = i + 1;
+    if (i !== mark) while (j < address.length && j !== mark && hl.has(j) === on) j++;
+    const part = esc(address.slice(i, j));
+    const inner = on ? `<b>${part}</b>` : `<span class="dim">${part}</span>`;
+    html += i === mark ? `<span class="mark">${inner}</span>` : inner;
+    i = j;
+  }
+  return `<span class="addr ${cls}">${html}</span>`;
+}
+
+/** Адрес для карточки: две строки по 6 групп из 4 символов, как на карточке Telegram Wallet. */
+function cardAddrHtml(address, job, mark = -1) {
+  const hl = new Set(patternPositions(job).map((x) => x.index));
+  const line = (from) =>
+    Array.from({ length: 6 }, (_, g) => {
+      let s = '';
+      for (let k = 0; k < 4; k++) {
+        const i = from + g * 4 + k;
+        const cls = [hl.has(i) ? 'on' : '', i === mark ? 'mark' : ''].filter(Boolean).join(' ');
+        s += cls ? `<i class="${cls}">${esc(address[i])}</i>` : esc(address[i]);
+      }
+      return s;
+    }).join(' ');
+  return `<div>${line(0)}</div><div>${line(24)}</div>`;
 }
 
 // ---------------- звук и уведомление о находке ----------------
@@ -283,6 +320,7 @@ function startHunt() {
   const job = currentJob();
   if (!validateJob(job).ok || state.device.status !== 'ready' || state.hunt) return;
   primeAlerts();
+  keepAwake(true);
   state.hunt = {
     job,
     p: matchProbability(job),
@@ -325,8 +363,7 @@ async function runHunt() {
         state.found.unshift({
           address,
           anchor: words,
-          prefix: h.job.prefix,
-          suffix: h.job.suffix,
+          ...(h.job.cells ? { cells: h.job.cells } : { prefix: h.job.prefix, suffix: h.job.suffix }),
           caseInsensitive: h.job.caseInsensitive,
           network: h.job.network,
           createdAt: Date.now(),
@@ -350,6 +387,7 @@ async function runHunt() {
 
 function finishHunt() {
   const h = state.hunt;
+  keepAwake(false);
   if (h.found) {
     alertFound(h.found);
     document.title = '✦ ' + t('foundTitle') + ' — Fancy';
@@ -368,6 +406,7 @@ function finishHunt() {
 function togglePause() {
   const h = state.hunt;
   if (!h || h.found) return;
+  keepAwake(h.paused);
   if (!h.paused) {
     h.paused = true;
     miner.stop(); // runHunt дождётся остановки и обновит экран
@@ -388,6 +427,26 @@ function stopHunt() {
     miner.stop();
   }
 }
+
+// Экран не гаснет, пока идёт поиск: на телефоне погасший экран ставит вкладку на паузу.
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (!on) {
+      await wakeLock?.release();
+      wakeLock = null;
+    } else if (!wakeLock && navigator.wakeLock && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => (wakeLock = null));
+    }
+  } catch {
+    /* браузер не дал — не страшно, просто экран может погаснуть */
+  }
+}
+// при возврате во вкладку браузер снимает блокировку сам — берём её снова, если поиск ещё идёт
+document.addEventListener('visibilitychange', () => {
+  if (state.hunt && !state.hunt.found && !state.hunt.paused) keepAwake(true);
+});
 
 // ---------------- разметка: каркас ----------------
 
@@ -440,6 +499,14 @@ function renderHome() {
           .join('')}</div>
         <p class="price-note">${t('priceNote')}</p>
         <ul class="points">${t('heroPoints').map((p) => `<li>${p}</li>`).join('')}</ul>
+        <div class="wcard-wrap"><div class="wcard" aria-hidden="true">
+          <div class="wcard-glare"></div>
+          <div class="wcard-bal"><span class="wcard-gem">✦</span><b>0</b><small>,00</small><span class="wcard-cur">GRAM</span></div>
+          <div class="wcard-usd">$0,00</div>
+          <div class="wcard-qr"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M14 14h3v3h-3zM18 18h3v3h-3zM18 14h3M14 18v3"/></svg></div>
+          <div class="wcard-name">${t('cardName')}</div>
+          <div class="wcard-addr mono" id="wcard-addr"></div>
+        </div></div>
         <div class="showcase mono" id="showcase"></div>
         <div class="live" id="live"></div>
       </div>
@@ -468,29 +535,92 @@ function renderHome() {
   renderWaitTable();
   renderMine();
   startShowcase();
+  initCardTilt();
+}
+
+/**
+ * 3D-наклон карточки за указателем, как в Telegram Wallet: край под курсором уходит вглубь,
+ * блик и тень следуют за ним. Значения плавно догоняют цель, анимация спит, пока карточка неподвижна.
+ */
+function initCardTilt() {
+  const card = $('.wcard');
+  if (!card || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const rest = { x: 0, y: 0, gx: 50, gy: 25, glow: 0, s: 1 };
+  const cur = { ...rest };
+  let target = { ...rest };
+  let raf = 0;
+  const frame = () => {
+    let moving = false;
+    for (const k in cur) {
+      const d = target[k] - cur[k];
+      cur[k] += d * 0.12;
+      if (Math.abs(d) > 0.002) moving = true;
+    }
+    card.style.setProperty('--rx', `${(-cur.y * 9).toFixed(2)}deg`);
+    card.style.setProperty('--ry', `${(cur.x * 12).toFixed(2)}deg`);
+    card.style.setProperty('--tx', cur.x.toFixed(3));
+    card.style.setProperty('--ty', cur.y.toFixed(3));
+    card.style.setProperty('--gx', `${cur.gx.toFixed(1)}%`);
+    card.style.setProperty('--gy', `${cur.gy.toFixed(1)}%`);
+    card.style.setProperty('--glow', cur.glow.toFixed(3));
+    card.style.setProperty('--s', cur.s.toFixed(4));
+    raf = moving && card.isConnected ? requestAnimationFrame(frame) : 0;
+  };
+  const kick = () => {
+    if (!raf) raf = requestAnimationFrame(frame);
+  };
+  const aim = (e) => {
+    const r = card.getBoundingClientRect();
+    const px = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const py = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    target = { x: px * 2 - 1, y: py * 2 - 1, gx: px * 100, gy: py * 100, glow: 1, s: 1.02 };
+    kick();
+  };
+  const release = () => {
+    target = { ...rest };
+    kick();
+  };
+  card.onpointermove = aim;
+  card.onpointerdown = aim;
+  card.onpointerleave = release;
+  // на телефоне карточка наклоняется под пальцем и возвращается, когда его отпускают
+  card.onpointerup = (e) => {
+    if (e.pointerType !== 'mouse') release();
+  };
+  card.onpointercancel = release;
 }
 
 let showcaseTimer = null;
 let filler = '';
+let drawShowcase = () => {};
 function startShowcase() {
   clearInterval(showcaseTimer);
   const rnd = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (x) => B64[x & 63]).join('');
   if (!filler) filler = 'ABCD'[crypto.getRandomValues(new Uint8Array(1))[0] & 3] + rnd(45);
-  const draw = () => {
+  const draw = (drawShowcase = () => {
     const el = $('#showcase');
     if (!el) return clearInterval(showcaseTimer);
+    const card = $('#wcard-addr');
     // во время поиска витрина показывает настоящий последний кандидат
     if (state.hunt?.sample) {
       el.innerHTML = addrHtml(state.hunt.sample, state.hunt.job, 'ghost-hl');
+      if (card) card.innerHTML = cardAddrHtml(state.hunt.sample, state.hunt.job);
       return;
     }
     const job = currentJob();
-    const pre = job.prefix || '';
-    const suf = job.suffix || '';
     const head = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
-    const addr = (head + pre + filler).slice(0, 48 - suf.length) + suf;
-    el.innerHTML = addrHtml(addr, job);
-  };
+    let addr;
+    if (job.cells) {
+      addr = (head + filler).split('').map((c, i) => (i >= 2 && job.cells[i]) || c).join('');
+    } else {
+      const pre = job.prefix || '';
+      const suf = job.suffix || '';
+      addr = (head + pre + filler).slice(0, 48 - suf.length) + suf;
+    }
+    const mark = job.cells ? cellMark() : -1;
+    el.innerHTML = addrHtml(addr, job, '', mark);
+    if (card) card.innerHTML = cardAddrHtml(addr, job, mark);
+  });
   draw();
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   showcaseTimer = setInterval(() => {
@@ -611,8 +741,8 @@ const renderDevice = renderLive;
 
 // ---------------- карточка настроек ----------------
 
-function seg(name, options, value, disabled) {
-  return `<div class="seg" data-seg="${name}">${options
+function seg(name, options, value, disabled, cls = '') {
+  return `<div class="seg ${cls}" data-seg="${name}">${options
     .map(([v, label]) => `<button data-v="${v}" class="${String(value) === String(v) ? 'on' : ''}" ${disabled ? 'disabled' : ''}>${label}</button>`)
     .join('')}</div>`;
 }
@@ -633,8 +763,148 @@ function field(kind, disabled) {
     <div class="err" data-err="${kind}"></div>`;
 }
 
+// ---------------- режим «любые позиции»: адрес клетками, как в Telegram Wallet (12 групп по 4) ----------------
+
+let cellCursor = 2;
+let cellFocus = false;
+let cellHover = -1;
+
+/** Какую позицию отметить в адресе слева: клетку под мышью, иначе клетку с курсором. */
+function cellMark() {
+  return cellHover >= 0 ? cellHover : cellFocus ? cellCursor : -1;
+}
+
+function cellsEditor(disabled) {
+  const head = NETWORKS[prefs.network].testOnly ? '0Q' : 'UQ';
+  let groups = '';
+  for (let g = 0; g < ADDR_LEN / 4; g++) {
+    let cells = '';
+    for (let k = 0; k < 4; k++) {
+      const i = g * 4 + k;
+      const v = i < 2 ? head[i] : prefs.cells[i];
+      cells += `<button type="button" class="cell${i < 2 ? ' fixed' : v ? ' set' : ''}" data-cell="${i}" ${disabled || i < 2 ? 'disabled' : ''}>${esc(v)}</button>`;
+    }
+    groups += `<div class="cgroup">${cells}</div>`;
+  }
+  return `
+    <label class="label">${t('cellsLabel')}</label>
+    <div class="cells${disabled ? ' off' : ''}" id="cells">
+      ${groups}
+      ${disabled ? '' : `<input id="cellin" class="cell-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="${esc(t('cellsLabel'))}" />`}
+    </div>
+    <div class="cells-bar"><span class="count" id="cells-count"></span>${disabled ? '' : `<button type="button" class="linkbtn" id="cells-clear">${t('clear')}</button>`}</div>
+    <div class="err" data-err="cells"></div>`;
+}
+
+/** Ввод в клетки: невидимое поле держит фокус и клавиатуру, клетки показывают курсор. */
+function bindCells(el) {
+  const box = el.querySelector('#cells');
+  const inp = el.querySelector('#cellin');
+  cellHover = -1; // клетки только что перерисованы — старая подсветка под мышью больше не актуальна
+  if (!box || !inp) return;
+  // пробел-«заглушка»: на телефонах Backspace в пустом поле не приходит как клавиша, а так он стирает пробел
+  const reset = () => {
+    inp.value = ' ';
+    inp.setSelectionRange(1, 1);
+  };
+  const paint = () => {
+    box.querySelectorAll('[data-cell]').forEach((c) => c.classList.toggle('cur', cellFocus && Number(c.dataset.cell) === cellCursor));
+    drawShowcase();
+  };
+  const put = (i, ch) => {
+    prefs.cells[i] = ch;
+    const c = box.querySelector(`[data-cell="${i}"]`);
+    c.textContent = ch;
+    c.classList.toggle('set', !!ch);
+  };
+  const changed = () => {
+    paint();
+    savePrefs();
+    updateLive();
+  };
+  const move = (i) => {
+    cellCursor = Math.max(2, Math.min(ADDR_LEN - 1, i));
+    paint();
+  };
+  const backspace = () => {
+    if (!prefs.cells[cellCursor] && cellCursor > 2) cellCursor--;
+    put(cellCursor, '');
+    changed();
+  };
+  box.querySelectorAll('[data-cell]').forEach((c) => {
+    c.onmousedown = (e) => e.preventDefault(); // фокус остаётся в поле ввода
+    c.onmouseenter = () => {
+      cellHover = Number(c.dataset.cell);
+      drawShowcase();
+    };
+    c.onmouseleave = () => {
+      cellHover = -1;
+      drawShowcase();
+    };
+    c.onclick = () => {
+      // фокус отмечаем сами: в окне без фокуса (или при программном клике) onfocus может не прийти
+      cellFocus = true;
+      move(Number(c.dataset.cell));
+      inp.focus();
+    };
+  });
+  inp.onfocus = () => {
+    cellFocus = true;
+    reset();
+    paint();
+  };
+  inp.onblur = () => {
+    cellFocus = false;
+    paint();
+  };
+  inp.oninput = () => {
+    if (inp.value === '') {
+      reset();
+      backspace();
+      return;
+    }
+    const chars = inp.value.replace(/[^A-Za-z0-9_-]/g, '');
+    reset();
+    if (!chars) return;
+    for (const ch of chars) {
+      put(cellCursor, ch);
+      if (cellCursor < ADDR_LEN - 1) cellCursor++;
+    }
+    changed();
+  };
+  inp.onkeydown = (e) => {
+    const go = { ArrowLeft: cellCursor - 1, ArrowRight: cellCursor + 1, Home: 2, End: ADDR_LEN - 1 }[e.key];
+    if (go !== undefined) {
+      e.preventDefault();
+      move(go);
+    } else if (e.key === 'Backspace') {
+      e.preventDefault();
+      backspace();
+    } else if (e.key === 'Delete') {
+      e.preventDefault();
+      put(cellCursor, '');
+      changed();
+    }
+  };
+  el.querySelector('#cells-clear').onclick = () => {
+    prefs.cells = Array(ADDR_LEN).fill('');
+    cellCursor = 2;
+    savePrefs();
+    renderSettings();
+  };
+}
+
+/** При первом переходе в «любые позиции» переносим туда текст из обычных полей. */
+function seedCells() {
+  if (prefs.cells.some(Boolean)) return;
+  const pre = prefs.mode === 'suffix' ? '' : prefs.prefix;
+  const suf = prefs.mode === 'prefix' ? '' : prefs.suffix;
+  [...pre].forEach((c, i) => (prefs.cells[2 + i] = c));
+  [...suf].forEach((c, i) => (prefs.cells[ADDR_LEN - suf.length + i] = c));
+}
+
 function powerName(p) {
-  return t('powerNames')[p];
+  return p === RECOMMENDED_POWER ? t('powerRecommended') : t('powerNames')[p];
 }
 
 function renderSettings() {
@@ -642,20 +912,22 @@ function renderSettings() {
   if (!el) return;
   const h = state.hunt;
   const busy = !!h;
-  const showPre = prefs.mode !== 'suffix';
-  const showSuf = prefs.mode !== 'prefix';
+  const cellsMode = prefs.mode === 'cells';
+  const showPre = !cellsMode && prefs.mode !== 'suffix';
+  const showSuf = !cellsMode && prefs.mode !== 'prefix';
   const chipKind = showSuf ? 'suffix' : 'prefix';
   const ready = state.device.status === 'ready';
   const advOpen = el.querySelector('details.adv')?.open ?? false;
   el.innerHTML = `
     <div class="panel-title">${t('settings')}</div>
-    ${seg('mode', [['suffix', t('atEnd')], ['prefix', t('atStart')], ['both', t('both')]], prefs.mode, busy)}
+    ${seg('mode', [['suffix', t('atEnd')], ['prefix', t('atStart')], ['both', t('both')], ['cells', t('anyPos')]], prefs.mode, busy, 'grid2')}
+    ${cellsMode ? cellsEditor(busy) : ''}
     ${showPre ? field('prefix', busy) : ''}
     ${showSuf ? field('suffix', busy) : ''}
-    ${busy ? '' : `<div class="chips"><span class="chips-label">${t('popular')}</span>${CHIPS[chipKind].map((c) => `<button class="chip" data-chip="${c}">${c}</button>`).join('')}</div>`}
+    ${busy || cellsMode ? '' : `<div class="chips"><span class="chips-label">${t('popular')}</span>${CHIPS[chipKind].map((c) => `<button class="chip" data-chip="${c}">${c}</button>`).join('')}</div>`}
     <label class="label">${t('caseLabel')}</label>
     ${seg('case', [[true, t('caseAny')], [false, t('caseExact')]], prefs.caseInsensitive, busy)}
-    ${busy ? '' : `<p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${t('allowed')}</p>`}
+    ${busy ? '' : `<p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${cellsMode ? t('cellsHint', MAX_FIXED) : t('allowed')}</p>`}
     <div id="estimate"></div>
     <label class="label">${t('gpuLoad')}</label>
     <div class="power" data-power>${POWER_LEVELS.map(
@@ -667,7 +939,7 @@ function renderSettings() {
             <button class="btn ghost" id="pause">${h.paused ? '▶ ' + t('resume') : '❚❚ ' + t('pause')}</button>
             <button class="btn ghost danger" id="stop">■ ${t('stop')}</button>
           </div>
-          <p class="note center">${t('randomNote')} ${t('notifyHint')}</p>`
+          <p class="note center">${t('randomNote')} ${IS_PHONE ? t('phoneHint') : t('notifyHint')}</p>`
         : `<details class="adv" ${advOpen ? 'open' : ''}>
             <summary>${t('advanced')}</summary>
             <p class="note">${t('powerNote')}</p>
@@ -696,7 +968,10 @@ function renderSettings() {
     b.onclick = () => {
       if (state.hunt) return;
       const k = b.parentElement.dataset.seg;
-      if (k === 'mode') prefs.mode = b.dataset.v;
+      if (k === 'mode') {
+        if (b.dataset.v === 'cells') seedCells();
+        prefs.mode = b.dataset.v;
+      }
       if (k === 'case') prefs.caseInsensitive = b.dataset.v === 'true';
       if (k === 'net') prefs.network = b.dataset.v;
       savePrefs();
@@ -728,6 +1003,7 @@ function renderSettings() {
       prefs.apiKey = e.target.value.trim();
       savePrefs();
     });
+  bindCells(el);
   $('#go') && ($('#go').onclick = startHunt);
   $('#pause') && ($('#pause').onclick = togglePause);
   $('#stop') && ($('#stop').onclick = stopHunt);
@@ -742,12 +1018,23 @@ function updateLive() {
     const e = document.querySelector(`[data-err="${kind}"]`);
     if (e) e.textContent = v[kind] ? t('err.' + v[kind]) : '';
   }
+  if (job.cells) {
+    document.querySelectorAll('[data-cell]').forEach((c) => c.classList.toggle('bad', !!v.cells[c.dataset.cell]));
+    const cnt = $('#cells-count');
+    if (cnt) {
+      cnt.textContent = t('cellsCount', v.count, MAX_FIXED);
+      cnt.classList.toggle('over', !!v.many);
+    }
+    const e = document.querySelector('[data-err="cells"]');
+    const code = v.many || Object.values(v.cells)[0];
+    if (e) e.textContent = code ? t('err.' + code) : '';
+  }
   const go = $('#go');
   if (go) go.disabled = !v.ok || state.device.status !== 'ready';
   const el = $('#estimate');
   if (el) {
     if (!v.ok) {
-      el.innerHTML = v.empty ? `<div class="err">${t('err.empty')}</div>` : '';
+      el.innerHTML = v.empty ? `<div class="err">${t(job.cells ? 'err.emptyCells' : 'err.empty')}</div>` : '';
     } else {
       const p = matchProbability(job);
       const median = effectiveRate() ? Math.LN2 / p / effectiveRate() : NaN;

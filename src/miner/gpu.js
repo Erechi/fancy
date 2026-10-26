@@ -5,8 +5,9 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import shaderSource from './vanity.wgsl?raw';
 import { sha512M64Wgsl } from './sha512-unrolled.js';
+import { feWgsl } from './fe-unrolled.js';
 
-const shaderCode = (wg) => `const WG: u32 = ${wg}u;\n${shaderSource}\n${sha512M64Wgsl()}`;
+const shaderCode = (wg) => `const WG: u32 = ${wg}u;\n${shaderSource}\n${sha512M64Wgsl()}\n${feWgsl()}`;
 import {
   NETWORKS,
   WORDLIST,
@@ -75,7 +76,10 @@ function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
 }
-const TARGET_MS = 220;
+// Длительность одного запуска. Каждый поток считает свою фразу почти всё время запуска,
+// поэтому короткие запуски теряют время на «хвост» последней волны потоков:
+// 100 мс — −12%, 220 мс — −4% от потолка. До таймаута драйвера Windows (2 с) далеко.
+const TARGET_MS = 400;
 
 function k512Buffer() {
   const u = new Uint32Array(80 * 4);
@@ -270,6 +274,9 @@ export class GpuMiner {
     enc.copyBufferToBuffer(slot.out, 0, slot.read, 0, slot.outSize);
     if (dbgRead) enc.copyBufferToBuffer(slot.dbg, 0, dbgRead, 0, dbgRead.size);
     d.queue.submit([enc.finish()]);
+    // Запрашиваем чтение сразу: mapAsync срабатывает, когда GPU дойдёт до работы, отправленной
+    // к моменту вызова. Если звать его позже, он ждёт и следующий запуск, и GPU простаивает.
+    slot.mapped = mode === 0 ? slot.read.mapAsync(GPUMapMode.READ) : null;
   }
 
   /** Сверяет GPU с CPU на n случайных фразах. Бросает исключение при любом расхождении. */
@@ -340,7 +347,7 @@ export class GpuMiner {
     const maxCount = this.wg * 32768 * 4;
 
     const collect = async (slot, n) => {
-      await slot.read.mapAsync(GPUMapMode.READ);
+      await slot.mapped;
       const r = new Uint32Array(slot.read.getMappedRange().slice(0));
       slot.read.unmap();
       const now = performance.now();
@@ -367,7 +374,7 @@ export class GpuMiner {
       const { dt, sample } = await collect(slot, n);
       const idle = power < 1 ? (dt * (1 - power)) / power : 0;
       onProgress(checked, (n / (dt + idle)) * 1000, sample);
-      // подгоняем размер запуска под ~220 мс, чтобы не ловить таймаут драйвера
+      // подгоняем размер запуска под TARGET_MS
       const k = Math.max(0.5, Math.min(2, TARGET_MS / Math.max(dt, 1)));
       count = Math.max(1024, Math.min(maxCount, Math.round((count * k) / 1024) * 1024));
       if (idle) await sleep(idle);

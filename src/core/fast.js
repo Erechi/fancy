@@ -199,10 +199,16 @@ export async function wordsToWallet(words, network = 'mainnet') {
 }
 
 // ---------- Шаблон ----------
-// job = { prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true } — любая из частей может быть пустой.
+// Два вида задания:
+//   job = { prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true } — начало и/или конец, любая часть может быть пустой;
+//   job = { cells: [48 строк по символу или ''], caseInsensitive } — любые символы на любых позициях адреса.
 
 export const PATTERN_CHARS = /^[A-Za-z0-9_-]+$/;
 export const MAX_PART = 8;
+export const ADDR_LEN = 48;
+/** Сколько символов можно задать в режиме «любые позиции» (столько позиций проверяет шейдер). */
+export const MAX_FIXED = 16;
+const CELL_CHAR = /^[A-Za-z0-9_-]$/;
 
 /** Код ошибки одной части (переводится в интерфейсе) или null. */
 export function validatePart(text, kind, caseInsensitive = true) {
@@ -214,7 +220,24 @@ export function validatePart(text, kind, caseInsensitive = true) {
   return null;
 }
 
+/** Проверка задания-клеток: { cells: {позиция: код ошибки}, empty, many, ok }. Позиции 0–1 («UQ») задать нельзя. */
+export function validateCells(job) {
+  const cells = {};
+  let n = 0;
+  job.cells.forEach((ch, i) => {
+    if (!ch) return;
+    n++;
+    if (i < 2 || i >= ADDR_LEN) cells[i] = 'locked';
+    else if (!CELL_CHAR.test(ch)) cells[i] = 'chars';
+    else if (i === 2 && !(job.caseInsensitive ? /[A-Da-d]/ : /[A-D]/).test(ch)) cells[i] = 'prefix3';
+  });
+  const empty = n === 0 ? 'empty' : null;
+  const many = n > MAX_FIXED ? 'many' : null;
+  return { cells, count: n, empty, many, ok: !empty && !many && Object.keys(cells).length === 0 };
+}
+
 export function validateJob(job) {
+  if (job.cells) return validateCells(job);
   const prefix = validatePart(job.prefix, 'prefix', job.caseInsensitive);
   const suffix = validatePart(job.suffix, 'suffix', job.caseInsensitive);
   const empty = !job.prefix && !job.suffix ? 'empty' : null;
@@ -229,6 +252,10 @@ export function patternPositions(job) {
     const alts = job.caseInsensitive && letter ? [ch.toUpperCase(), ch.toLowerCase()] : [ch];
     out.push({ index, alts });
   };
+  if (job.cells) {
+    job.cells.forEach((ch, i) => ch && push(ch, i));
+    return out;
+  }
   const p = job.prefix || '';
   const sfx = job.suffix || '';
   for (let i = 0; i < p.length; i++) push(p[i], 2 + i);

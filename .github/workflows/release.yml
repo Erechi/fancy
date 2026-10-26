@@ -1,5 +1,6 @@
 # Релиз собирается здесь, из открытого кода: при пуше тега vX.Y.Z
-# GitHub прогоняет тесты, собирает Fancy.html и печатает его SHA-256 в лог.
+# GitHub прогоняет тесты, собирает Fancy.html и печатает его SHA-256 в лог,
+# а тот же файл выкладывает сайтом на GitHub Pages — версия для телефона.
 name: Release
 
 on:
@@ -8,6 +9,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   release:
@@ -36,3 +39,20 @@ jobs:
             Download `Fancy.html` and open it in Chrome or Edge.
 
             SHA-256 — в файле `Fancy.html.sha256` и в логе этой сборки (Actions → Release).
+
+            📱 С телефона: https://erechi.github.io/fancy/
+      - name: Сайт для GitHub Pages — тот же файл
+        run: mkdir site && cp Fancy.html site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

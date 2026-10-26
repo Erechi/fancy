@@ -1,6 +1,6 @@
 {
   "name": "fancy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Бесплатный генератор красивых адресов Telegram Wallet на вашей видеокарте (WebGPU). Без сервера, всё в браузере.",
   "scripts": {
     "test": "node test/derive.test.js && node test/sandbox.test.js",

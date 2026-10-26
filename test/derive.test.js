@@ -82,6 +82,22 @@ assert.equal(validateJob({ prefix: 'dog', suffix: '', caseInsensitive: false }).
 assert.ok(validateJob({ prefix: 'dog', suffix: 'x', caseInsensitive: true }).ok);
 assert.equal(validateJob({ prefix: '', suffix: '', caseInsensitive: true }).empty, 'empty');
 
+// 3b) режим «любые позиции»: слово в середине и в конце
+{
+  const cells = Array(48).fill('');
+  'KING'.split('').forEach((c, i) => (cells[44 + i] = c));
+  'GB39'.split('').forEach((c, i) => (cells[8 + i] = c));
+  const A2 = 'UQBPxxxxGB39xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxKING';
+  assert.ok(makeMatcher({ cells, caseInsensitive: false })(A2));
+  assert.ok(!makeMatcher({ cells, caseInsensitive: false })(A2.replace('GB39', 'GB38')));
+  assert.equal(matchProbability({ cells, caseInsensitive: false }), Math.pow(1 / 64, 8));
+  assert.ok(validateJob({ cells, caseInsensitive: false }).ok);
+  const bad = Array(48).fill('');
+  bad[2] = 'x';
+  assert.equal(validateJob({ cells: bad, caseInsensitive: true }).cells[2], 'prefix3');
+  assert.equal(validateJob({ cells: Array(48).fill('A'), caseInsensitive: true }).many, 'many');
+}
+
 // 4) сообщение деплоя + смены ключа: структура и подписи
 {
   const anchor = generateMnemonic(WORDLIST, 128).split(' ');
