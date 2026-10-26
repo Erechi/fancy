@@ -278,10 +278,31 @@ function gpuModelName(fallback) {
     .join(' ');
 }
 
+/**
+ * Длительность одного запуска на видеокарте. На телефоне — короткие запуски: мобильный драйвер
+ * сбрасывает видеокарту («GPU device lost»), если она слишком долго занята одной задачей.
+ */
+let gpuTargetMs = IS_PHONE ? 80 : undefined;
+
+/** Видеокарту сбросили — создаём заново с вдвое более короткими запусками и снова сверяем с CPU. */
+async function reviveMiner() {
+  try {
+    miner?.device.destroy(); // если старая видеокарта ещё жива — освобождаем
+    gpuTargetMs = Math.max(30, Math.round((gpuTargetMs ?? 400) / 2));
+    const m = await GpuMiner.create({ targetMs: gpuTargetMs });
+    await m.selfTest(16);
+    miner = m;
+    return true;
+  } catch (e) {
+    console.warn('Не удалось восстановить видеокарту:', e);
+    return false;
+  }
+}
+
 async function detectDevice() {
   const d = state.device;
   try {
-    miner = await GpuMiner.create();
+    miner = await GpuMiner.create({ targetMs: gpuTargetMs });
     d.name = gpuModelName(miner.adapterName);
     d.status = 'selftest';
     renderDevice();
@@ -345,6 +366,7 @@ async function runHunt() {
   h.runStarted = performance.now();
   miner.power = prefs.power;
   const ticker = setInterval(renderLive, 250);
+  let failed = false;
   try {
     await miner.run(
       h.job,
@@ -374,10 +396,23 @@ async function runHunt() {
     );
   } catch (e) {
     h.error = e.message || String(e);
+    failed = true;
   }
   clearInterval(ticker);
-  h.activeMs += performance.now() - h.runStarted;
+  const ranMs = performance.now() - h.runStarted;
+  h.activeMs += ranMs;
   h.checkedBefore = h.checked;
+  // Видеокарту сбросил драйвер (чаще всего на телефоне или после сворачивания браузера): это
+  // «GPU device lost» или «mapAsync was not successful». Поднимаем её заново, сверяем с CPU
+  // и продолжаем тот же поиск. Сдаёмся после трёх сбоев подряд.
+  if (failed && !h.found) {
+    h.recoveries = ranMs > 30000 ? 0 : h.recoveries || 0;
+    if (h.recoveries < 3 && (await reviveMiner())) {
+      h.recoveries++;
+      h.error = null;
+      if (!h.paused) return runHunt();
+    }
+  }
   if (h.paused && !h.found && !h.error) {
     renderSettings();
     return renderLive();

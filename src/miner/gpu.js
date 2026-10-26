@@ -76,9 +76,10 @@ function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
 }
-// Длительность одного запуска. Каждый поток считает свою фразу почти всё время запуска,
+// Длительность одного запуска по умолчанию. Каждый поток считает свою фразу почти всё время запуска,
 // поэтому короткие запуски теряют время на «хвост» последней волны потоков:
 // 100 мс — −12%, 220 мс — −4% от потолка. До таймаута драйвера Windows (2 с) далеко.
+// У мобильных видеокарт сторожевой таймер строже — им передают меньший targetMs.
 const TARGET_MS = 400;
 
 function k512Buffer() {
@@ -182,13 +183,14 @@ function entropyBytes(w0, w1, w2, w3) {
 }
 
 export class GpuMiner {
-  static async create({ workgroupSize = 64 } = {}) {
+  static async create({ workgroupSize = 64, targetMs = TARGET_MS } = {}) {
     if (!navigator.gpu) throw new Error('Браузер не поддерживает WebGPU');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('Видеокарта недоступна для WebGPU');
     const device = await adapter.requestDevice();
     const m = new GpuMiner();
     m.wg = workgroupSize;
+    m.targetMs = targetMs;
     m.adapterName = [adapter.info?.vendor, adapter.info?.architecture, adapter.info?.description]
       .filter(Boolean)
       .join(' ');
@@ -339,7 +341,8 @@ export class GpuMiner {
     const net = NETWORKS[network];
     const pattern = patternUniform(job);
     const match = makeMatcher(job);
-    let count = 8192;
+    // начинаем с малого: на слабой видеокарте даже 8192 фразы — это секунды и риск сброса драйвером
+    let count = 1024;
     let checked = 0;
     let lastDone = performance.now();
     let i = 0;
@@ -374,9 +377,9 @@ export class GpuMiner {
       const { dt, sample } = await collect(slot, n);
       const idle = power < 1 ? (dt * (1 - power)) / power : 0;
       onProgress(checked, (n / (dt + idle)) * 1000, sample);
-      // подгоняем размер запуска под TARGET_MS
-      const k = Math.max(0.5, Math.min(2, TARGET_MS / Math.max(dt, 1)));
-      count = Math.max(1024, Math.min(maxCount, Math.round((count * k) / 1024) * 1024));
+      // подгоняем размер запуска под targetMs
+      const k = Math.max(0.25, Math.min(2, this.targetMs / Math.max(dt, 1)));
+      count = Math.max(256, Math.min(maxCount, Math.round((count * k) / 256) * 256));
       if (idle) await sleep(idle);
     };
 
