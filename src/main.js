@@ -16,6 +16,7 @@ import {
 } from './core/fast.js';
 import { Toncenter, buildDeployAndRotate, formatGram } from './core/wallet.js';
 import { GpuMiner } from './miner/gpu.js';
+import { CpuMiner, cpuThreads } from './cpu/cpu.js';
 import { t, lang, setLang, locale } from './ui/i18n.js';
 
 /** Ссылка на репозиторий и версия — из package.json (см. vite.config.js). */
@@ -73,7 +74,7 @@ function loadFound() {
 }
 
 const prefs = Object.assign(
-  { mode: 'suffix', prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true, network: 'mainnet', apiKey: '', power: RECOMMENDED_POWER },
+  { mode: 'suffix', prefix: 'Dog', suffix: 'GRAM', caseInsensitive: true, network: 'mainnet', apiKey: '', power: RECOMMENDED_POWER, engine: 'gpu' },
   store.get(K_PREFS, {}),
 );
 // режим «любые позиции»: символ или '' для каждой из 48 позиций адреса
@@ -92,6 +93,12 @@ const saveFound = () => store.set(K_FOUND, state.found);
 const savePrefs = () => store.set(K_PREFS, prefs);
 
 let miner = null;
+/** Режим «процессор»: пул воркеров с WebAssembly. rate — замеренная скорость на 100 % нагрузки. */
+const cpu = { miner: null, rate: 0, busy: false };
+/** Видеокарта не работает — считаем на процессоре, не трогая сохранённый выбор пользователя. */
+let gpuFallback = false;
+const useCpu = () => gpuFallback || prefs.engine === 'cpu';
+const activeMiner = () => (useCpu() ? (cpu.miner ??= new CpuMiner()) : miner);
 
 // ---------------- утилиты ----------------
 
@@ -165,7 +172,7 @@ function tier(sec) {
 
 /** Скорость с учётом выбранной нагрузки. */
 function effectiveRate() {
-  return state.device.rate * prefs.power;
+  return (useCpu() ? cpu.rate : state.device.rate) * prefs.power;
 }
 
 async function copy(text, btn) {
@@ -283,13 +290,25 @@ function gpuModelName(fallback) {
  * сбрасывает видеокарту («GPU device lost»), если она слишком долго занята одной задачей.
  */
 let gpuTargetMs = IS_PHONE ? 80 : undefined;
+/** Первая порция фраз. Слабой мобильной видеокарте (например, Mali-G57) и 1024 фразы — почти секунда. */
+let gpuStartCount = IS_PHONE ? 64 : undefined;
+const gpuOptions = () => ({ targetMs: gpuTargetMs, startCount: gpuStartCount });
 
-/** Видеокарту сбросили — создаём заново с вдвое более короткими запусками и снова сверяем с CPU. */
+/** Ошибка похожа на сброс видеокарты драйвером, а не на отсутствие WebGPU. */
+const isGpuReset = (e) => /lost|instance|mapasync|destroyed/i.test(String(e?.message || e));
+
+/** Видеокарту сбросили — дальше работаем вдвое более короткими запусками с маленьким стартом. */
+function softenGpu() {
+  gpuTargetMs = Math.max(30, Math.round((gpuTargetMs ?? 400) / 2));
+  gpuStartCount = 64;
+}
+
+/** Видеокарту сбросили — создаём заново с более мягкими настройками и снова сверяем с CPU. */
 async function reviveMiner() {
   try {
     miner?.device.destroy(); // если старая видеокарта ещё жива — освобождаем
-    gpuTargetMs = Math.max(30, Math.round((gpuTargetMs ?? 400) / 2));
-    const m = await GpuMiner.create({ targetMs: gpuTargetMs });
+    softenGpu();
+    const m = await GpuMiner.create(gpuOptions());
     await m.selfTest(16);
     miner = m;
     return true;
@@ -299,37 +318,123 @@ async function reviveMiner() {
   }
 }
 
-async function detectDevice() {
-  const d = state.device;
-  try {
-    miner = await GpuMiner.create({ targetMs: gpuTargetMs });
-    d.name = gpuModelName(miner.adapterName);
-    d.status = 'selftest';
-    renderDevice();
-    await miner.selfTest(16);
-    d.status = 'bench';
-    renderDevice();
-    d.rate = await benchmark();
-    d.status = 'ready';
-  } catch (e) {
-    console.warn('GPU недоступен:', e);
-    d.status = 'nogpu';
-    d.error = e.message || String(e);
-    miner = null;
-  }
-  renderDevice();
+/** Всё, что зависит от состояния видеокарты и процессора. */
+function renderDeviceAll() {
+  renderLive();
   renderSettings();
   renderWaitTable();
 }
 
+function gpuFailed(e) {
+  const d = state.device;
+  console.warn('GPU недоступен:', e);
+  d.status = 'nogpu';
+  d.error = e.message || String(e);
+  d.reset = isGpuReset(e);
+  miner = null;
+  if (CpuMiner.available()) gpuFallback = true;
+}
+
+const BENCH_MS = 3500;
+
+/** Компилирует шейдер, сверяет видеокарту с CPU и замеряет скорость. Слабый телефон может сбросить её — одна попытка помягче. */
+async function prepareGpu() {
+  const d = state.device;
+  const once = async () => {
+    miner = await GpuMiner.create(gpuOptions());
+    d.name = gpuModelName(miner.adapterName);
+    d.status = 'selftest';
+    renderLive();
+    await miner.selfTest(16);
+    d.status = 'bench';
+    renderLive();
+    d.rate = await benchmark(miner);
+  };
+  try {
+    await once();
+  } catch (e) {
+    if (!isGpuReset(e)) throw e;
+    console.warn('Видеокарта сбросилась при подготовке, пробуем мягче:', e);
+    miner?.device.destroy();
+    softenGpu();
+    await once();
+  }
+  d.status = 'ready';
+}
+
+let preparing = null;
+/** Видеокарта: при открытии в режиме «видеокарта» и при первом переключении на неё. Не вышло — переходим на процессор. */
+function prepareGpuOnce() {
+  if (['ready', 'nogpu'].includes(state.device.status)) return;
+  preparing ??= prepareGpu()
+    .catch(gpuFailed)
+    .finally(() => {
+      preparing = null;
+      renderDeviceAll();
+      if (gpuFallback) prepareCpu();
+    });
+}
+
+/** Замер процессора: при открытии в режиме «процессор» и при первом переключении на него. */
+async function prepareCpu() {
+  if (cpu.rate || cpu.busy) return;
+  cpu.busy = true;
+  cpu.error = null;
+  renderDeviceAll();
+  try {
+    cpu.rate = await benchmark(activeMiner());
+  } catch (e) {
+    console.warn('Процессор:', e);
+    cpu.error = e.message || String(e);
+  }
+  cpu.busy = false;
+  renderDeviceAll();
+}
+
+/** Замеряем только выбранный движок: если человек выбрал процессор из-за сбоев видеокарты, её не трогаем. */
+function prepareEngine() {
+  if (useCpu()) prepareCpu();
+  else prepareGpuOnce();
+}
+
+async function detectDevice() {
+  const d = state.device;
+  try {
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error(navigator.gpu ? 'Видеокарта недоступна для WebGPU' : 'Браузер не поддерживает WebGPU');
+    d.name = gpuModelName([adapter.info?.vendor, adapter.info?.architecture, adapter.info?.description].filter(Boolean).join(' '));
+    d.status = 'found';
+  } catch (e) {
+    gpuFailed(e);
+  }
+  renderDeviceAll();
+  prepareEngine();
+}
+
+/** Можно жать «Начать поиск»: выбранный движок проверен и замерен. */
+const canStart = () => (useCpu() ? cpu.rate > 0 && !cpu.busy : state.device.status === 'ready');
+
+const loadLabel = () => (useCpu() ? t('cpuLoad') : t('gpuLoad'));
+
+/** Строки таблицы «сколько ждать» для скорости rate. */
+function waitRows(rate) {
+  const rows = [];
+  for (let n = 3; n <= MAX_PART; n++) {
+    const any = Math.LN2 / Math.pow(2 / 64, n) / rate;
+    const exact = Math.LN2 / Math.pow(1 / 64, n) / rate;
+    rows.push(`<tr><td class="mono">${n}</td><td class="${tier(any)}">${fmtDur(any)}</td><td class="${tier(exact)}">${fmtDur(exact)}</td></tr>`);
+  }
+  return rows.join('');
+}
+
 // Короткий прогон на недостижимом шаблоне при полной нагрузке; разгон отбрасываем, берём медиану.
-async function benchmark(ms = 3500) {
+async function benchmark(m, ms = BENCH_MS) {
   const job = { suffix: 'zZ9_-zZ9', caseInsensitive: false, network: 'mainnet' };
   const samples = [];
-  miner.power = 1;
-  const done = miner.run(job, (_, r) => r && samples.push(r), () => {});
+  m.power = 1;
+  const done = m.run(job, (_, r) => r && samples.push(r), () => {});
   await new Promise((r) => setTimeout(r, ms));
-  miner.stop();
+  m.stop();
   await done;
   const tail = samples.slice(Math.floor(samples.length / 2)).sort((a, b) => a - b);
   return tail[Math.floor(tail.length / 2)] || samples.at(-1) || 0;
@@ -339,11 +444,13 @@ async function benchmark(ms = 3500) {
 
 function startHunt() {
   const job = currentJob();
-  if (!validateJob(job).ok || state.device.status !== 'ready' || state.hunt) return;
+  if (!validateJob(job).ok || !canStart() || state.hunt) return;
   primeAlerts();
   keepAwake(true);
   state.hunt = {
     job,
+    miner: activeMiner(),
+    onCpu: useCpu(),
     p: matchProbability(job),
     checkedBefore: 0,
     checked: 0,
@@ -364,11 +471,11 @@ async function runHunt() {
   const h = state.hunt;
   const match = makeMatcher(h.job);
   h.runStarted = performance.now();
-  miner.power = prefs.power;
+  h.miner.power = prefs.power;
   const ticker = setInterval(renderLive, 250);
   let failed = false;
   try {
-    await miner.run(
+    await h.miner.run(
       h.job,
       (checked, rate, sample) => {
         h.checked = h.checkedBefore + checked;
@@ -381,7 +488,7 @@ async function runHunt() {
         const w = await wordsToWallet(words, h.job.network);
         if (w.address !== address || !match(address)) return;
         h.found = address;
-        miner.stop();
+        h.miner.stop();
         state.found.unshift({
           address,
           anchor: words,
@@ -405,10 +512,11 @@ async function runHunt() {
   // Видеокарту сбросил драйвер (чаще всего на телефоне или после сворачивания браузера): это
   // «GPU device lost» или «mapAsync was not successful». Поднимаем её заново, сверяем с CPU
   // и продолжаем тот же поиск. Сдаёмся после трёх сбоев подряд.
-  if (failed && !h.found) {
+  if (failed && !h.found && !h.onCpu) {
     h.recoveries = ranMs > 30000 ? 0 : h.recoveries || 0;
     if (h.recoveries < 3 && (await reviveMiner())) {
       h.recoveries++;
+      h.miner = miner;
       h.error = null;
       if (!h.paused) return runHunt();
     }
@@ -444,7 +552,7 @@ function togglePause() {
   keepAwake(h.paused);
   if (!h.paused) {
     h.paused = true;
-    miner.stop(); // runHunt дождётся остановки и обновит экран
+    h.miner.stop(); // runHunt дождётся остановки и обновит экран
   } else {
     h.paused = false;
     renderSettings();
@@ -459,7 +567,7 @@ function stopHunt() {
     h.paused = false;
     finishHunt();
   } else {
-    miner.stop();
+    h.miner.stop();
   }
 }
 
@@ -536,8 +644,8 @@ function renderHome() {
         <ul class="points">${t('heroPoints').map((p) => `<li>${p}</li>`).join('')}</ul>
         <div class="wcard-wrap"><div class="wcard" aria-hidden="true">
           <div class="wcard-glare"></div>
-          <div class="wcard-bal"><span class="wcard-gem">✦</span><b>0</b><small>,00</small><span class="wcard-cur">GRAM</span></div>
-          <div class="wcard-usd">$0,00</div>
+          <div class="wcard-bal"><span class="wcard-gem">✦</span><b>0</b><small>${lang === 'ru' ? ',00' : '.00'}</small><span class="wcard-cur">GRAM</span></div>
+          <div class="wcard-usd">${lang === 'ru' ? '$0,00' : '$0.00'}</div>
           <div class="wcard-qr"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M14 14h3v3h-3zM18 18h3v3h-3zM18 14h3M14 18v3"/></svg></div>
           <div class="wcard-name">${t('cardName')}</div>
           <div class="wcard-addr mono" id="wcard-addr"></div>
@@ -709,34 +817,36 @@ function renderLive() {
   if (!el) return;
   const d = state.device;
   const h = state.hunt;
-  const st = h ? (h.paused ? 'paused' : 'run') : d.status === 'ready' ? 'idle' : d.status === 'nogpu' ? 'bad' : 'wait';
-  if (el.dataset.st !== st || el.dataset.lang !== lang) {
-    el.dataset.st = st;
-    el.dataset.lang = lang;
+  const onCpu = h ? h.onCpu : useCpu();
+  const bad = onCpu ? !!cpu.error : d.status === 'nogpu';
+  const st = h ? (h.paused ? 'paused' : 'run') : canStart() ? 'idle' : bad ? 'bad' : 'wait';
+  const key = `${st}|${lang}|${onCpu ? 'cpu' : 'gpu'}`;
+  if (el.dataset.key !== key) {
+    el.dataset.key = key;
     liveShown = {};
     const label = {
       run: t('running'),
       paused: t('paused'),
       idle: t('liveReady'),
       bad: t('liveNoGpu'),
-      wait: d.status === 'checking' ? t('devChecking') : d.status === 'selftest' ? t('devSelftest', esc(d.name)) : t('devBench'),
+      wait: onCpu || d.status === 'bench' ? t('devBench') : d.status === 'selftest' ? t('devSelftest', esc(d.name)) : t('devChecking'),
     }[st];
     el.className = `live ${st}`;
     el.innerHTML = `
       <div class="live-head">
         <span class="state"><i></i>${label}</span>
-        ${d.name ? `<span class="gpu">${esc(d.name)}</span>` : ''}
+        ${(onCpu ? t('cpuName', cpuThreads()) : d.name) ? `<span class="gpu">${esc(onCpu ? t('cpuName', cpuThreads()) : d.name)}</span>` : ''}
       </div>
       ${
         st === 'bad'
-          ? `<p class="live-err">${esc(t('gpuUnavailable', d.error))}</p>`
+          ? `<p class="live-err">${esc(onCpu ? t('cpuError', cpu.error) : d.reset ? t('gpuReset') : t('gpuUnavailable', d.error))}</p>`
           : `<div class="metrics">
         <div><span class="k">${t('speed')}</span><b class="mono" id="lv-speed">—</b><small>${t('perSec')}</small></div>
         <div><span class="k">${t('liveEta')}</span><b id="lv-eta">—</b><small id="lv-eta-sub">${t('median')}</small></div>
         <div><span class="k">${t('liveElapsed')}</span><b class="mono" id="lv-time">00:00</b><small id="lv-checked">${t('liveNotStarted')}</small></div>
       </div>
       <div class="bar"><i id="lv-bar"></i></div>
-      <div class="live-foot"><span id="lv-chance">${t('chance')}: 0%</span><span id="lv-power">${t('gpuLoad')}: ${Math.round(prefs.power * 100)}%</span></div>`
+      <div class="live-foot"><span id="lv-chance">${t('chance')}: 0%</span><span id="lv-power">${loadLabel()}: ${Math.round(prefs.power * 100)}%</span></div>`
       }`;
   }
   if (st === 'bad') return;
@@ -768,11 +878,10 @@ function renderLive() {
   const ch = $('#lv-chance');
   if (ch) ch.textContent = `${t('chance')}: ${Math.min(99, Math.floor(chance * 100))}%`;
   const pw = $('#lv-power');
-  if (pw) pw.textContent = `${t('gpuLoad')}: ${Math.round(prefs.power * 100)}%`;
+  if (pw) pw.textContent = `${loadLabel()}: ${Math.round(prefs.power * 100)}%`;
   if (h) document.title = `${fmtCompact(h.checked)} · ${patternLabel(h.job)} — Fancy`;
 }
 
-const renderDevice = renderLive;
 
 // ---------------- карточка настроек ----------------
 
@@ -951,7 +1060,7 @@ function renderSettings() {
   const showPre = !cellsMode && prefs.mode !== 'suffix';
   const showSuf = !cellsMode && prefs.mode !== 'prefix';
   const chipKind = showSuf ? 'suffix' : 'prefix';
-  const ready = state.device.status === 'ready';
+  const ready = canStart();
   const advOpen = el.querySelector('details.adv')?.open ?? false;
   el.innerHTML = `
     <div class="panel-title">${t('settings')}</div>
@@ -964,7 +1073,10 @@ function renderSettings() {
     ${seg('case', [[true, t('caseAny')], [false, t('caseExact')]], prefs.caseInsensitive, busy)}
     ${busy ? '' : `<p class="note">${prefs.caseInsensitive ? t('hintAny') : t('hintExact')} ${cellsMode ? t('cellsHint', MAX_FIXED) : t('allowed')}</p>`}
     <div id="estimate"></div>
-    <label class="label">${t('gpuLoad')}</label>
+    <label class="label">${t('engineLabel')}</label>
+    ${seg('engine', [['gpu', t('engineGpu')], ['cpu', t('engineCpu')]], useCpu() ? 'cpu' : 'gpu', busy || gpuFallback)}
+    ${busy ? '' : `<p class="note">${gpuFallback ? t('gpuFallback') : useCpu() ? t('cpuNote') : t('gpuNote')}</p>`}
+    <label class="label">${loadLabel()}</label>
     <div class="power" data-power>${POWER_LEVELS.map(
       (p) => `<button data-p="${p}" class="${prefs.power === p ? 'on' : ''}"><b>${Math.round(p * 100)}%</b><span>${powerName(p)}</span></button>`,
     ).join('')}</div>
@@ -977,7 +1089,7 @@ function renderSettings() {
           <p class="note center">${t('randomNote')} ${IS_PHONE ? t('phoneHint') : t('notifyHint')}</p>`
         : `<details class="adv" ${advOpen ? 'open' : ''}>
             <summary>${t('advanced')}</summary>
-            <p class="note">${t('powerNote')}</p>
+            <p class="note">${t(useCpu() ? 'powerNoteCpu' : 'powerNote')}</p>
             <label class="label">${t('network')}</label>
             ${seg('net', [['mainnet', 'Mainnet'], ['testnet', 'Testnet']], prefs.network)}
             <label class="label">${t('apiKey')}</label>
@@ -1009,6 +1121,12 @@ function renderSettings() {
       }
       if (k === 'case') prefs.caseInsensitive = b.dataset.v === 'true';
       if (k === 'net') prefs.network = b.dataset.v;
+      if (k === 'engine') {
+        prefs.engine = b.dataset.v;
+        savePrefs();
+        renderDeviceAll();
+        return prepareEngine();
+      }
       savePrefs();
       renderSettings();
       startShowcase();
@@ -1027,7 +1145,7 @@ function renderSettings() {
     b.onclick = () => {
       prefs.power = Number(b.dataset.p);
       savePrefs();
-      if (state.hunt && miner) miner.power = prefs.power;
+      if (state.hunt) state.hunt.miner.power = prefs.power;
       el.querySelectorAll('[data-p]').forEach((x) => x.classList.toggle('on', x === b));
       updateLive();
       renderWaitTable();
@@ -1065,7 +1183,7 @@ function updateLive() {
     if (e) e.textContent = code ? t('err.' + code) : '';
   }
   const go = $('#go');
-  if (go) go.disabled = !v.ok || state.device.status !== 'ready';
+  if (go) go.disabled = !v.ok || !canStart();
   const el = $('#estimate');
   if (el) {
     if (!v.ok) {
@@ -1091,18 +1209,12 @@ function renderWaitTable() {
     el.innerHTML = '';
     return;
   }
-  const rows = [];
-  for (let n = 3; n <= MAX_PART; n++) {
-    const any = Math.LN2 / Math.pow(2 / 64, n) / rate;
-    const exact = Math.LN2 / Math.pow(1 / 64, n) / rate;
-    rows.push(`<tr><td class="mono">${n}</td><td class="${tier(any)}">${fmtDur(any)}</td><td class="${tier(exact)}">${fmtDur(exact)}</td></tr>`);
-  }
   el.innerHTML = `
     <h2>${t('waitTitle')}</h2>
     <p class="sub">${t('waitSub', fmtRate(rate))} ${t('waitBoth')}</p>
     <div class="table-wrap"><table class="wait">
       <thead><tr><th>${t('chars')}</th><th>${t('anyCase')}</th><th>${t('exactCase')}</th></tr></thead>
-      <tbody>${rows.join('')}</tbody>
+      <tbody>${waitRows(rate)}</tbody>
     </table></div>`;
 }
 

@@ -26,9 +26,9 @@ Open the link in Chrome (Android)<br>or Safari (iPhone). Nothing to download.
 </tr>
 </table>
 
-[Русский](README.md) · [Telegram channel](https://t.me/blackwrites) · [How to use](#how-to-use) · [Security](#security--privacy) · [How it works](#how-it-works)
+[Русский](README.md) · [What's new](CHANGELOG.md#english) · [Telegram channel](https://t.me/blackwrites) · [How to use](#how-to-use) · [Security](#security--privacy) · [How it works](#how-it-works)
 
-<img src="docs/home.png" alt="Fancy main screen" width="860">
+<img src="docs/en/home.png" alt="Fancy main screen" width="860">
 
 </div>
 
@@ -45,8 +45,8 @@ A regular Telegram Wallet address is 48 random characters. Fancy finds one that 
 | Start + end | `UQ`**`Dog`**`…`**`GRAM`** |
 | Any positions | `UQAJlhPcIbjWyI5zWuQN`**`DOOM`**`H2HFfmKFo9Y9vQwTwd8a`**`KING`** — up to 16 characters anywhere |
 
-- **Your GPU does the work** — hundreds of thousands of candidates per second via WebGPU, right in a browser tab.
-- **See the wait time instantly** — while you type, Fancy shows how long it will take on *your* computer.
+- **Your GPU does the work** — hundreds of thousands of candidates per second via WebGPU, right in a browser tab. No suitable GPU? The CPU takes over (WebAssembly on all cores): slower, but works on any device.
+- **See the wait time instantly** — while you type, Fancy shows how long it will take on *your* device.
 - **All 24 words are created on your device.** Nobody else has them — not a server, not the author.
 - **Free.** You only pay the network to activate the wallet: send **0.1 GRAM** to the new address, the fee is ≈ 0.001 GRAM and the rest stays in your wallet.
 
@@ -54,7 +54,7 @@ A regular Telegram Wallet address is 48 random characters. Fancy finds one that 
 
 1. **On a computer:** download [**`Fancy.html`**](../../releases/latest/download/Fancy.html) and double-click it to open in a recent **Chrome** or **Edge**.
    **On a phone:** open [**erechi.github.io/fancy**](https://erechi.github.io/fancy/) in Chrome (Android) or Safari (iPhone, iOS 26+).
-2. Fancy checks your GPU and measures its speed (up to 30 s on first launch).
+2. Fancy checks your GPU and measures its speed (up to 30 s on first launch). No suitable GPU — it switches to the CPU by itself.
 3. Type your text: **at the end**, **at the start**, **both** — or pick **"Any positions"** and type characters straight into the address cells. The left card shows the expected wait right away.
 4. Press **"Start search"**. On a computer you can minimize the window; keep the tab open. On a phone keep the tab in front — the screen stays on by itself. You'll hear a signal when it's found.
 5. **"Set up the wallet"** → write down **all 24 words** in order, on paper.
@@ -64,8 +64,8 @@ A regular Telegram Wallet address is 48 random characters. Fancy finds one that 
 > **Tip:** start with short text (3–4 characters). You can practice on testnet: "Advanced" → "Network" → Testnet.
 
 <p align="center">
-  <img src="docs/search.png" alt="Search in progress" width="49%">
-  <img src="docs/found.png" alt="Address found" width="49%">
+  <img src="docs/en/search.png" alt="Search in progress" width="49%">
+  <img src="docs/en/found.png" alt="Address found" width="49%">
 </p>
 
 ## How long it takes
@@ -90,7 +90,7 @@ Your device will differ — Fancy measures its speed and recalculates.
 ## Requirements
 
 - **A browser with WebGPU:** Chrome or Edge 113+ on Windows, macOS or Linux; on a phone — Chrome on Android 12+ or Safari on iOS 26+ (recent Firefox if WebGPU is enabled).
-- **A GPU.** Without WebGPU the search won't start — Fancy tells you so.
+- **A GPU — preferably.** Without WebGPU Fancy switches to the CPU by itself. To choose manually: "Compute on" → GPU / CPU. The CPU is dozens of times slower: about 11k phrases/s on a Ryzen 7 9800X3D vs 500k on an RTX 5070 Ti.
 - **Internet** is only needed for the key-switch step (balance check and sending the transaction).
 - **Adjustable load:** 25 / 50 / 75 / 100 %. Default is 75 % on a computer and 50 % on a phone — quieter and cooler, only slightly slower.
 
@@ -159,11 +159,15 @@ src/
   miner/sha512-unrolled.js  unrolled SHA-512 for the PBKDF2 hot loop
   miner/fe-unrolled.js unrolled ed25519 field arithmetic
   miner/gpu.js         shader driver, GPU ↔ CPU self-test, load control
+  cpu/pbkdf2-wasm.js   PBKDF2-SHA512 in WebAssembly (module built by a generator, no compilers)
+  cpu/worker.js        CPU-mode worker thread
+  cpu/cpu.js           worker pool, load = share of cores
 test/
   derive.test.js       keys and addresses vs @scure/bip39, micro-key-producer, @ton/core
   sandbox.test.js      @ton/sandbox emulator with the live WalletTg bytecode (config-123.json)
 .github/workflows/     checks and automated release
-docs/                  README screenshots
+docs/                  README screenshots (docs/en — English UI)
+scripts/screenshots.mjs  re-captures the screenshots from the built site
 ```
 
 ## Disclaimer

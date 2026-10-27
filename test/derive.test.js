@@ -22,6 +22,7 @@ import {
   phraseBytesToSeedSync,
 } from '../src/core/fast.js';
 import { buildDeployAndRotate, buildStateInit } from '../src/core/wallet.js';
+import { createSeedHasher } from '../src/cpu/pbkdf2-wasm.js';
 
 const code = Cell.fromBoc(Buffer.from(TRAMPOLINE_BOC_HEX, 'hex'))[0];
 assert.equal(code.hash().toString('hex'), bytesToHex(TRAMPOLINE_CODE_HASH), 'хеш трамплина');
@@ -152,4 +153,13 @@ assert.equal(validateJob({ prefix: '', suffix: '', caseInsensitive: true }).empt
   assert.equal(req.remainingRefs, 0);
 }
 
-console.log('OK: деривация, адреса, матчер и сообщение смены ключа совпадают с эталоном');
+// 5) режим «процессор»: PBKDF2 на WebAssembly совпадает с эталонным BIP39 seed
+{
+  const wasmSeed = createSeedHasher();
+  for (let i = 0; i < 20; i++) {
+    const m = generateMnemonic(WORDLIST, 128);
+    assert.equal(bytesToHex(wasmSeed(new TextEncoder().encode(m))), bytesToHex(mnemonicToSeedSync(m)));
+  }
+}
+
+console.log('OK: деривация, адреса, матчер, сообщение смены ключа и WebAssembly-PBKDF2 совпадают с эталоном');

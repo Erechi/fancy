@@ -183,7 +183,7 @@ function entropyBytes(w0, w1, w2, w3) {
 }
 
 export class GpuMiner {
-  static async create({ workgroupSize = 64, targetMs = TARGET_MS } = {}) {
+  static async create({ workgroupSize = 64, targetMs = TARGET_MS, startCount = 1024 } = {}) {
     if (!navigator.gpu) throw new Error('Браузер не поддерживает WebGPU');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('Видеокарта недоступна для WebGPU');
@@ -191,6 +191,7 @@ export class GpuMiner {
     const m = new GpuMiner();
     m.wg = workgroupSize;
     m.targetMs = targetMs;
+    m.startCount = startCount;
     m.adapterName = [adapter.info?.vendor, adapter.info?.architecture, adapter.info?.description]
       .filter(Boolean)
       .join(' ');
@@ -341,8 +342,8 @@ export class GpuMiner {
     const net = NETWORKS[network];
     const pattern = patternUniform(job);
     const match = makeMatcher(job);
-    // начинаем с малого: на слабой видеокарте даже 8192 фразы — это секунды и риск сброса драйвером
-    let count = 1024;
+    // начинаем с малого: на слабой видеокарте даже 1024 фразы — это секунда и риск сброса драйвером
+    let count = this.startCount;
     let checked = 0;
     let lastDone = performance.now();
     let i = 0;
@@ -379,7 +380,7 @@ export class GpuMiner {
       onProgress(checked, (n / (dt + idle)) * 1000, sample);
       // подгоняем размер запуска под targetMs
       const k = Math.max(0.25, Math.min(2, this.targetMs / Math.max(dt, 1)));
-      count = Math.max(256, Math.min(maxCount, Math.round((count * k) / 256) * 256));
+      count = Math.max(this.wg, Math.min(maxCount, Math.round((count * k) / this.wg) * this.wg));
       if (idle) await sleep(idle);
     };
 

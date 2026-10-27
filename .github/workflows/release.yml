@@ -1,6 +1,7 @@
 # Релиз собирается здесь, из открытого кода: при пуше тега vX.Y.Z
 # GitHub прогоняет тесты, собирает Fancy.html и печатает его SHA-256 в лог,
 # а тот же файл выкладывает сайтом на GitHub Pages — версия для телефона.
+# Описание релиза — из .github/release-notes/vX.Y.Z.md (RU + EN), ниже добавляются ссылки и SHA-256.
 name: Release
 
 on:
@@ -16,8 +17,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -28,22 +29,31 @@ jobs:
         run: |
           cp dist/index.html Fancy.html
           sha256sum Fancy.html | tee Fancy.html.sha256
-      - uses: softprops/action-gh-release@v2
+      - name: Описание релиза
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          sum=$(cut -d' ' -f1 Fancy.html.sha256)
+          {
+            if [ -f "$notes" ]; then cat "$notes"; echo; fi
+            echo "---"
+            echo
+            echo "**💻 Компьютер / Computer:** скачайте \`Fancy.html\` ниже и откройте в Chrome или Edge · download \`Fancy.html\` below and open it in Chrome or Edge."
+            echo
+            echo "**📱 Телефон / Phone:** https://erechi.github.io/fancy/"
+            echo
+            echo "SHA-256 \`Fancy.html\`: \`$sum\` — та же сумма в логе этой сборки · the same sum is in this build's log."
+          } > release-body.md
+          cat release-body.md
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             Fancy.html
             Fancy.html.sha256
           generate_release_notes: true
-          body: |
-            **Скачайте `Fancy.html` и откройте его в Chrome или Edge.**
-            Download `Fancy.html` and open it in Chrome or Edge.
-
-            SHA-256 — в файле `Fancy.html.sha256` и в логе этой сборки (Actions → Release).
-
-            📱 С телефона: https://erechi.github.io/fancy/
+          body_path: release-body.md
       - name: Сайт для GitHub Pages — тот же файл
         run: mkdir site && cp Fancy.html site/index.html
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
@@ -55,4 +65,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

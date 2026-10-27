@@ -10,7 +10,8 @@ const repoUrl = (pkg.repository?.url || pkg.repository || '').replace(/^git\+/, 
 // Fetch/XHR разрешены только к toncenter; это страховка на случай будущей XSS, а не полная защита от утечки.
 const CSP = [
   "default-src 'none'",
-  "script-src 'self' 'unsafe-inline'",
+  // wasm-unsafe-eval — только компиляция WebAssembly (режим «процессор»), не eval для JavaScript
+  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
   'worker-src blob:',
   'connect-src https://toncenter.com https://testnet.toncenter.com',
   "style-src 'self' 'unsafe-inline'",
@@ -29,6 +30,8 @@ const cspPlugin = {
 // Сборка в один index.html: его можно открыть локально или выложить на любой статический хостинг.
 export default defineConfig({
   plugins: [viteSingleFile(), cspPlugin],
+  // воркер режима «процессор» встраивается в файл; классический формат — модульные воркеры из blob не работают с file://
+  worker: { format: 'iife' },
   server: { port: 5178, host: '127.0.0.1', strictPort: true },
   define: {
     global: 'globalThis',
